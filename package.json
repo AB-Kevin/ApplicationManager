@@ -1,0 +1,59 @@
+{
+  "name": "applicationmanager-file-manager",
+  "version": "0.0.1",
+  "description": "ApplicationManager - a desktop file manager with preview, tagging, and notes",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "release": "electron-builder --win --publish always",
+    "release:mac": "electron-builder --mac --publish always"
+  },
+  "devDependencies": {
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.applicationmanager.filemanager",
+    "productName": "ApplicationManager",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "AB-Kevin",
+      "repo": "ApplicationManager",
+      "releaseType": "release"
+    }
+  },
+  "allowScripts": {
+    "electron@31.7.7": true,
+    "electron-winstaller@5.4.0": true
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "exiftool-vendored": "^37.1.0",
+    "pdf-lib": "^1.17.1"
+  }
+}
