@@ -165,7 +165,8 @@ const state = {
   apiMappingArmed: null, // gfFieldId currently "armed" (clicked, awaiting its App-side match), or null
   apiMappingMoveArmed: null, // App-side row id "armed" to be repositioned (its drag handle was clicked, not dragged) -- scroll anywhere, then click a row to drop it there. Mutually exclusive with apiMappingArmed.
   apiMappingCustomFields: [], // working copy of formSchema.customFields, grown by addMappingCustomField
-  apiMappingOrder: [], // working copy of apiConfig.appFieldOrder — App-side row display order, purely cosmetic (see buildAppFieldRows)
+  apiMappingRemovedFields: [], // working copy of formSchema.removedFields, grown by deleteMappingField — deleting a non-required field's ✕ here is the same permanent delete Manage Form Fields does
+  apiMappingOrder: [], // working copy of formSchema.appFieldOrder — App-side row display order, shared with Manage Form Fields and the real Application tab (see buildAppFieldRows)
   apiMappingSlotCount: 1, // highest household-member "slot" currently offered (1 = none beyond primary/spouse) — see addMappingHouseholdMemberSlot
   apiMappingBusy: false,
   apiMappingError: null,
@@ -2050,7 +2051,7 @@ function renderRail() {
         </div>
         <div class="bm-rail-label-row">
           <div class="bm-rail-label">Application Form</div>
-          <button class="bm-rail-link" id="manage-fields-btn" title="Add, remove, or require fields on the Application tab">Manage fields</button>
+          <button class="bm-rail-link" id="manage-fields-btn" title="Add, delete, require, or reorder fields on the Application tab">Manage fields</button>
         </div>
         <div class="bm-rail-label-row">
           <div class="bm-rail-label">Online Applications</div>
@@ -3601,14 +3602,10 @@ async function testApiConnection() {
 async function pickApiForm(formId) {
   const sameForm = state.apiConfig?.formId === formId;
   // Spreads the previous config first ({} if there wasn't one yet -- a
-  // brand-new connection) so anything not explicitly listed below, like
-  // appFieldOrder, survives every trip back through "Settings" instead of
-  // being silently wiped by a config object that only ever named the fields
-  // known about when this function was first written. That's exactly what
-  // was happening before: appFieldOrder isn't form-specific data (it's just
-  // a display preference over our own schema fields), so it's carried over
-  // unconditionally rather than reset on a form switch the way
-  // fieldMapping/customFields/importedEntries correctly are.
+  // brand-new connection) so anything not explicitly listed below survives
+  // every trip back through "Settings" instead of being silently wiped by a
+  // config object that only ever named the fields known about when this
+  // function was first written.
   const config = {
     ...state.apiConfig,
     siteUrl: state.apiSetupDraft.siteUrl.trim(),
@@ -3710,7 +3707,8 @@ async function openApiMappingModal() {
   state.apiMappingArmed = null;
   state.apiMappingMoveArmed = null;
   state.apiMappingCustomFields = [...(state.formSchema?.customFields || [])];
-  state.apiMappingOrder = [...(state.apiConfig.appFieldOrder || [])];
+  state.apiMappingRemovedFields = [...(state.formSchema?.removedFields || [])];
+  state.apiMappingOrder = [...(state.formSchema?.appFieldOrder || [])];
   state.apiMappingSlotCount = 1;
   render();
   try {
@@ -3743,6 +3741,7 @@ function closeApiMappingModal() {
   state.apiMappingArmed = null;
   state.apiMappingMoveArmed = null;
   state.apiMappingCustomFields = [];
+  state.apiMappingRemovedFields = [];
   state.apiMappingOrder = [];
   render();
 }
@@ -3794,16 +3793,17 @@ function addMappingCustomField(scope) {
   positionMappingConnectors();
 }
 
-// Permanently removes a custom field from the App-side list -- for cleaning
-// up ones that turned out redundant (e.g. created before a real schema
-// field like ssExempt was available as a proper target). Only custom fields
-// are deletable; the fixed household/primary/spouse/slot fields are real
-// schema paths that always exist. Any API field still connected to it is
-// disconnected first (confirmed, since that's a real change, not just
-// tidying) rather than left pointing at a target that no longer exists.
-function deleteMappingCustomField(key) {
-  const customField = state.apiMappingCustomFields.find((c) => c.key === key);
-  const target = customField ? customFieldTarget(customField) : `custom:${key}`;
+// Permanently deletes an App-side row -- a custom field (splices it out of
+// apiMappingCustomFields entirely, e.g. one created before a real schema
+// field like ssExempt was available as a proper target) or a built-in one
+// (joins apiMappingRemovedFields, same permanent delete Manage Form Fields
+// does -- no restore, ever). Required fields never even show this button
+// (see renderApiMappingModal), so there's no required-check needed here.
+// Any API field still connected to the target is disconnected first
+// (confirmed, since that's a real change, not just tidying) rather than
+// left pointing at a target that no longer exists.
+function deleteMappingField(target) {
+  const customField = state.apiMappingCustomFields.find((c) => customFieldTarget(c) === target);
   const connectedGfIds = Object.keys(state.apiMappingConnections).filter(
     (gfId) => state.apiMappingConnections[gfId] === target
   );
@@ -3813,7 +3813,11 @@ function deleteMappingCustomField(key) {
       .join(", ");
     if (!confirm(`"${names}" is still connected to this field. Delete it and disconnect that field?`)) return;
   }
-  state.apiMappingCustomFields = state.apiMappingCustomFields.filter((c) => c.key !== key);
+  if (customField) {
+    state.apiMappingCustomFields = state.apiMappingCustomFields.filter((c) => c !== customField);
+  } else if (!state.apiMappingRemovedFields.includes(target)) {
+    state.apiMappingRemovedFields.push(target);
+  }
   connectedGfIds.forEach((gfId) => delete state.apiMappingConnections[gfId]);
   state.apiMappingOrder = state.apiMappingOrder.filter((id) => id !== target);
   render();
@@ -3929,9 +3933,12 @@ function moveAppFieldTo(movedId, targetId) {
     render();
     return;
   }
-  const ids = buildAppFieldRows(state.apiMappingSlotCount, state.apiMappingCustomFields, state.apiMappingOrder).map(
-    (r) => r.id
-  );
+  const ids = buildAppFieldRows(
+    state.apiMappingSlotCount,
+    state.apiMappingCustomFields,
+    state.apiMappingOrder,
+    state.apiMappingRemovedFields
+  ).map((r) => r.id);
   const fromIdx = ids.indexOf(movedId);
   if (fromIdx === -1) return;
   ids.splice(fromIdx, 1);
@@ -3949,7 +3956,7 @@ function moveArmedToEdge(edge) {
   const movedId = state.apiMappingMoveArmed;
   if (!movedId) return;
   state.apiMappingMoveArmed = null;
-  const ids = buildAppFieldRows(state.apiMappingSlotCount, state.apiMappingCustomFields, state.apiMappingOrder)
+  const ids = buildAppFieldRows(state.apiMappingSlotCount, state.apiMappingCustomFields, state.apiMappingOrder, state.apiMappingRemovedFields)
     .map((r) => r.id)
     .filter((id) => id !== movedId);
   if (edge === "top") ids.unshift(movedId);
@@ -3973,17 +3980,18 @@ async function saveApiMapping() {
   const customFields = state.apiMappingCustomFields.filter((c) => usedTargets.has(customFieldTarget(c)));
   const appFieldOrder = state.apiMappingOrder.length
     ? state.apiMappingOrder
-    : buildAppFieldRows(state.apiMappingSlotCount, customFields, []).map((r) => r.id);
+    : buildAppFieldRows(state.apiMappingSlotCount, customFields, [], state.apiMappingRemovedFields).map((r) => r.id);
 
   const oldFieldMapping = state.apiConfig.fieldMapping || [];
   state.apiConfig = await window.api.saveApiConfig(state.folder, {
     ...state.apiConfig,
     fieldMapping,
-    appFieldOrder,
   });
   state.formSchema = await window.api.saveFormSchema(state.folder, {
     ...state.formSchema,
     customFields,
+    removedFields: state.apiMappingRemovedFields,
+    appFieldOrder,
   });
   state.customFieldDefs = state.formSchema.customFields || [];
   const hasImportedEntries = Object.keys(state.apiConfig.importedEntries || {}).length > 0;
@@ -4009,15 +4017,18 @@ function renderApiMappingModal() {
   const armedField = state.apiMappingArmed
     ? state.apiMappingFields.find((f) => f.gfFieldId === state.apiMappingArmed)
     : null;
-  const appRows = buildAppFieldRows(state.apiMappingSlotCount, state.apiMappingCustomFields, state.apiMappingOrder);
+  const appRows = buildAppFieldRows(state.apiMappingSlotCount, state.apiMappingCustomFields, state.apiMappingOrder, state.apiMappingRemovedFields);
   const moveArmedRow = state.apiMappingMoveArmed ? appRows.find((r) => r.id === state.apiMappingMoveArmed) : null;
-  // Where a brand-new field can be categorized -- Household plus every
-  // member category currently in play, including whichever household-member
-  // slots have been added so far (see addMappingHouseholdMemberSlot).
+  // Where a brand-new field can be categorized -- Primary/Spouse/Household/
+  // Church plus every member category currently in play, including
+  // whichever household-member slots have been added so far (see
+  // addMappingHouseholdMemberSlot), in the same order as the Application
+  // tab's own categories.
   const newFieldScopes = [
-    { value: "household", label: "Household" },
     { value: "primary", label: "Primary member" },
     { value: "spouse", label: "Spouse" },
+    { value: "household", label: "Household" },
+    { value: "church", label: "Church" },
     ...Array.from({ length: Math.max(0, state.apiMappingSlotCount - 1) }, (_, i) => ({
       value: `slot${i + 2}`,
       label: `Household Member ${i + 2}`,
@@ -4076,7 +4087,7 @@ function renderApiMappingModal() {
                         <div class="bm-app-field-row${state.apiMappingMoveArmed === r.id ? " move-armed" : ""}" data-app-field-id="${r.id}">
                           <span class="bm-api-drag-handle" data-drag-handle="${r.id}" title="Click to arm for a long-distance move, or drag to reorder directly">${ICONS.grip || "⠿"}</span>
                           <span class="bm-api-field-label">${escapeHtml(r.label)}</span>
-                          ${r.customKey ? `<button class="bm-api-field-disconnect" data-delete-custom="${r.customKey}" title="Delete this field">${ICONS.x}</button>` : ""}
+                          ${isFieldRequired(r.id) ? "" : `<button class="bm-api-field-disconnect" data-delete-mapping-field="${r.id}" title="Delete this field">${ICONS.x}</button>`}
                         </div>`
                         )
                         .join("")}
@@ -4111,7 +4122,7 @@ function renderApiMappingModal() {
     });
     overlay.querySelectorAll(".bm-app-field-row").forEach((row) => {
       row.addEventListener("click", (e) => {
-        if (e.target.closest("[data-drag-handle]") || e.target.closest("[data-delete-custom]")) return;
+        if (e.target.closest("[data-drag-handle]") || e.target.closest("[data-delete-mapping-field]")) return;
         if (state.apiMappingMoveArmed) {
           moveAppFieldTo(state.apiMappingMoveArmed, row.dataset.appFieldId);
           return;
@@ -4126,10 +4137,10 @@ function renderApiMappingModal() {
         startMappingReorderDrag(handle.dataset.dragHandle, e);
       });
     });
-    overlay.querySelectorAll("[data-delete-custom]").forEach((btn) => {
+    overlay.querySelectorAll("[data-delete-mapping-field]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        deleteMappingCustomField(btn.dataset.deleteCustom);
+        deleteMappingField(btn.dataset.deleteMappingField);
       });
     });
     const addSlotBtn = overlay.querySelector("#api-add-slot-btn");
@@ -4152,14 +4163,17 @@ function renderApiMappingModal() {
 
 // ---- Manage Form Fields ----
 // Independent of any API connection (unlike the mapping modal above) -- a
-// paper-only folder still needs to be able to add, require, or remove
-// fields as the org's real paper form changes over time. Reads/writes the
-// same .form-schema.json the mapping modal's App-side list and customFields
-// come from, so the two screens never disagree about what fields exist.
+// paper-only folder still needs to be able to add, delete, require, or
+// reorder fields as the org's real paper form changes over time.
+// Reads/writes the same .form-schema.json the mapping modal's App-side list,
+// customFields, and appFieldOrder come from, so the two screens never
+// disagree about what fields exist or what order they're in.
 
 function openManageFieldsModal() {
   state.manageFieldsDraft = JSON.parse(
-    JSON.stringify(state.formSchema || { removedFields: [], requiredFields: DEFAULT_REQUIRED_FIELDS, customFields: [] })
+    JSON.stringify(
+      state.formSchema || { removedFields: [], requiredFields: DEFAULT_REQUIRED_FIELDS, customFields: [], appFieldOrder: [] }
+    )
   );
   state.manageFieldsNewLabel = "";
   state.manageFieldsNewScope = "household";
@@ -4181,45 +4195,58 @@ function toggleManageFieldRequired(target) {
   render();
 }
 
-// A required field can't be removed until it's unmarked first -- the one
-// rule that makes "required" mean something (see the project plan). Only
-// built-in fields go through remove/restore; a custom field is deleted
-// outright instead, below.
-function removeManageField(target) {
+// One delete action for every field, built-in or custom -- there's no
+// "remove and maybe restore later" concept: once a field is deleted here,
+// it's gone from the Application tab/mapping modal/this list for good (a
+// built-in field's target just joins removedFields with no UI ever offered
+// to undo that, since a field that shouldn't be on the form -- e.g. a
+// spouse's "marital status", which is always "married" by definition --
+// isn't coming back). A required field can't be deleted until it's
+// unmarked first -- the one rule that makes "required" mean something.
+// Warns first if the online form's field mapping still points at it; the
+// actual retarget-to-"ignore" happens in saveManageFields once this is
+// confirmed and the field is really gone from the draft.
+function deleteManageField(target, label) {
   const d = state.manageFieldsDraft;
   if (d.requiredFields.includes(target)) {
-    alert("This field is required, so it can't be removed yet. Uncheck Required first.");
+    alert("This field is required, so it can't be deleted yet. Uncheck Required first.");
     return;
   }
-  if (!d.removedFields.includes(target)) d.removedFields.push(target);
-  render();
-}
-
-function restoreManageField(target) {
-  const d = state.manageFieldsDraft;
-  d.removedFields = d.removedFields.filter((t) => t !== target);
-  render();
-}
-
-// Permanently deletes a custom field -- unlike a built-in field, there's no
-// "restore" for one of these since it isn't part of the schema otherwise.
-// Warns first if the online form's field mapping still points at it, same
-// precedent as the mapping modal's own deleteMappingCustomField; the actual
-// retarget-to-"ignore" happens in saveManageFields below once this is
-// confirmed and the field is really gone from the draft.
-function deleteManageCustomField(key) {
-  const d = state.manageFieldsDraft;
-  const customField = d.customFields.find((c) => c.key === key);
-  if (!customField) return;
-  const target = customFieldTarget(customField);
+  const customField = d.customFields.find((c) => customFieldTarget(c) === target);
   const connected = state.apiConfig ? (state.apiConfig.fieldMapping || []).filter((m) => m.target === target) : [];
   if (connected.length > 0) {
     const names = connected.map((m) => m.label || m.gfFieldId).join(", ");
-    if (!confirm(`"${names}" on the online form is still mapped to this field. Delete it and disconnect that mapping?`)) return;
+    if (!confirm(`"${names}" on the online form is still mapped to "${label}". Delete it and disconnect that mapping?`)) return;
+  } else if (!confirm(`Delete "${label}"? This can't be undone.`)) {
+    return;
   }
-  d.customFields = d.customFields.filter((c) => c.key !== key);
+  if (customField) d.customFields = d.customFields.filter((c) => c !== customField);
+  else if (!d.removedFields.includes(target)) d.removedFields.push(target);
   d.requiredFields = d.requiredFields.filter((t) => t !== target);
-  d.removedFields = d.removedFields.filter((t) => t !== target);
+  render();
+}
+
+// Moves a row up/down among its own scope's siblings only (Primary's fields
+// reorder independently of Spouse's, etc. -- there's no cross-scope
+// reordering UI here, unlike the mapping modal's one flat list) by editing
+// just that scope's slice of the single shared appFieldOrder array, so
+// every other scope's relative order is left untouched.
+function moveManageFieldRow(scope, rowId, direction) {
+  const d = state.manageFieldsDraft;
+  const slotCount = manageFieldsSlotCount(d.customFields);
+  const fullRows = buildAppFieldRows(slotCount, d.customFields, d.appFieldOrder || [], d.removedFields);
+  const fullOrder = fullRows.map((r) => r.id);
+  const scopeIndices = [];
+  fullRows.forEach((row, i) => {
+    if (rowBelongsToScope(row, scope)) scopeIndices.push(i);
+  });
+  const posInScope = scopeIndices.findIndex((i) => fullOrder[i] === rowId);
+  const swapWith = direction === "up" ? posInScope - 1 : posInScope + 1;
+  if (posInScope === -1 || swapWith < 0 || swapWith >= scopeIndices.length) return;
+  const i1 = scopeIndices[posInScope];
+  const i2 = scopeIndices[swapWith];
+  [fullOrder[i1], fullOrder[i2]] = [fullOrder[i2], fullOrder[i1]];
+  d.appFieldOrder = fullOrder;
   render();
 }
 
@@ -4239,16 +4266,18 @@ async function saveManageFields() {
   state.formSchema = await window.api.saveFormSchema(state.folder, draft);
   state.customFieldDefs = state.formSchema.customFields || [];
 
-  // A custom field deleted above may still be "connected" in the online
-  // form's field mapping -- scrub any fieldMapping row pointing at a custom
-  // target that didn't survive into the saved schema (a fixed/household
-  // target always survives, so this only ever touches custom-field targets).
+  // A field deleted above (built-in or custom) may still be "connected" in
+  // the online form's field mapping -- since deleting is now permanent,
+  // scrub any fieldMapping row pointing at it back to "ignore" rather than
+  // leaving it silently pointed at a target that no longer exists anywhere.
   if (state.apiConfig && Array.isArray(state.apiConfig.fieldMapping)) {
     const survivingCustomTargets = new Set(state.formSchema.customFields.map((c) => customFieldTarget(c)));
+    const deletedTargets = new Set(state.formSchema.removedFields || []);
     let changed = false;
     const fieldMapping = state.apiConfig.fieldMapping.map((m) => {
       const isCustomTarget = (m.target || "").startsWith("membercustom:") || (m.target || "").startsWith("custom:");
-      if (isCustomTarget && !survivingCustomTargets.has(m.target)) {
+      const targetGone = m.target && m.target !== "ignore" && ((isCustomTarget && !survivingCustomTargets.has(m.target)) || deletedTargets.has(m.target));
+      if (targetGone) {
         changed = true;
         return { ...m, target: "ignore" };
       }
@@ -4265,33 +4294,31 @@ async function saveManageFields() {
 
 function renderManageFieldsModal() {
   const d = state.manageFieldsDraft;
-  const sections = buildManageFieldSections(manageFieldsSlotCount(d.customFields), d.customFields, currentAppFieldOrder());
+  const sections = buildManageFieldSections(manageFieldsSlotCount(d.customFields), d.customFields, d.appFieldOrder || [], d.removedFields);
   const scopeOptions = [
-    { value: "household", label: "Household" },
     { value: "primary", label: "Primary member" },
     { value: "spouse", label: "Spouse" },
+    { value: "household", label: "Household" },
+    { value: "church", label: "Church" },
     ...Array.from({ length: Math.max(0, manageFieldsSlotCount(d.customFields) - 1) }, (_, i) => ({
       value: `slot${i + 2}`,
       label: `Household Member ${i + 2}`,
     })),
   ];
-  const renderRow = (row) => {
-    const removed = d.removedFields.includes(row.id);
+  const renderRow = (row, scope, idx, total) => {
     const required = d.requiredFields.includes(row.id);
     return `
-      <div class="bm-manage-field-row${removed ? " removed" : ""}">
+      <div class="bm-manage-field-row">
+        <span class="bm-manage-field-reorder">
+          <button class="bm-manage-field-reorder-btn" data-move-target="${row.id}" data-move-scope="${scope}" data-move-dir="up" ${idx === 0 ? "disabled" : ""} title="Move up">${ICONS.sortAsc}</button>
+          <button class="bm-manage-field-reorder-btn" data-move-target="${row.id}" data-move-scope="${scope}" data-move-dir="down" ${idx === total - 1 ? "disabled" : ""} title="Move down">${ICONS.sortDesc}</button>
+        </span>
         <label class="bm-checkbox-label bm-manage-field-required">
-          <input type="checkbox" data-require-target="${row.id}" ${required ? "checked" : ""} ${removed ? "disabled" : ""} />
+          <input type="checkbox" data-require-target="${row.id}" ${required ? "checked" : ""} />
           Required
         </label>
-        <span class="bm-manage-field-label">${escapeHtml(row.label)}${removed ? " <em>(removed)</em>" : ""}</span>
-        ${
-          row.isCustom
-            ? `<button class="bm-btn bm-btn-ghost bm-btn-sm" data-delete-field="${row.customKey}">${ICONS.x} Delete</button>`
-            : removed
-              ? `<button class="bm-btn bm-btn-ghost bm-btn-sm" data-restore-field="${row.id}">Restore</button>`
-              : `<button class="bm-btn bm-btn-ghost bm-btn-sm" data-remove-field="${row.id}">Remove</button>`
-        }
+        <span class="bm-manage-field-label">${escapeHtml(row.label)}</span>
+        <button class="bm-btn bm-btn-ghost bm-btn-sm" data-delete-target="${row.id}" data-delete-label="${escapeHtml(row.label)}">${ICONS.x} Delete</button>
       </div>`;
   };
   const overlay = el(`
@@ -4299,7 +4326,7 @@ function renderManageFieldsModal() {
       <div class="bm-modal bm-manage-fields-modal">
         <div class="bm-modal-header">
           <div class="bm-modal-title">Manage Form Fields</div>
-          <div class="bm-modal-sub">Add, remove, or require fields on the Application tab -- works whether or not this folder is connected to the online form.</div>
+          <div class="bm-modal-sub">Add, delete, require, or reorder fields on the Application tab -- works whether or not this folder is connected to the online form. Deleting a field is permanent.</div>
         </div>
         <div class="bm-modal-body bm-manage-fields-body">
           ${sections
@@ -4307,7 +4334,7 @@ function renderManageFieldsModal() {
               (s) => `
             <div class="bm-manage-field-section">
               <div class="bm-section-label">${escapeHtml(s.group)}</div>
-              ${s.rows.map(renderRow).join("") || `<div class="bm-rail-empty">No fields yet</div>`}
+              ${s.rows.map((row, idx) => renderRow(row, s.scope, idx, s.rows.length)).join("") || `<div class="bm-rail-empty">No fields yet</div>`}
             </div>`
             )
             .join("")}
@@ -4338,14 +4365,11 @@ function renderManageFieldsModal() {
   overlay.querySelectorAll("[data-require-target]").forEach((input) => {
     input.addEventListener("change", () => toggleManageFieldRequired(input.dataset.requireTarget));
   });
-  overlay.querySelectorAll("[data-remove-field]").forEach((btn) => {
-    btn.addEventListener("click", () => removeManageField(btn.dataset.removeField));
+  overlay.querySelectorAll("[data-move-target]").forEach((btn) => {
+    btn.addEventListener("click", () => moveManageFieldRow(btn.dataset.moveScope, btn.dataset.moveTarget, btn.dataset.moveDir));
   });
-  overlay.querySelectorAll("[data-restore-field]").forEach((btn) => {
-    btn.addEventListener("click", () => restoreManageField(btn.dataset.restoreField));
-  });
-  overlay.querySelectorAll("[data-delete-field]").forEach((btn) => {
-    btn.addEventListener("click", () => deleteManageCustomField(btn.dataset.deleteField));
+  overlay.querySelectorAll("[data-delete-target]").forEach((btn) => {
+    btn.addEventListener("click", () => deleteManageField(btn.dataset.deleteTarget, btn.dataset.deleteLabel));
   });
   overlay.querySelector("#manage-field-new-label").addEventListener("input", (e) => {
     state.manageFieldsNewLabel = e.target.value;

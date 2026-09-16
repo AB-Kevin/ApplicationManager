@@ -1264,13 +1264,14 @@ ipcMain.handle("save-api-config", async (event, folder, config) => {
 // ---- Form schema (required/removable fields + custom field definitions) ----
 //
 // The paper form isn't static -- the org has already changed it once and
-// will again -- so which fields are required, which have been removed (see
-// the renderer's Manage Form Fields screen), and the custom field
-// definitions themselves all live in their own hidden per-folder file, same
-// precedent as TAG_CONFIG_FILENAME/API_CONFIG_FILENAME above. customFields
-// used to live inside .api-config.json, but that only exists for a folder
-// that's connected to an API -- a paper-only folder still needs to be able
-// to add/require/remove fields, so it moved here.
+// will again -- so which fields are required, which have been deleted (see
+// the renderer's Manage Form Fields screen), the custom field definitions
+// themselves, and the fields' display order all live in their own hidden
+// per-folder file, same precedent as TAG_CONFIG_FILENAME/API_CONFIG_FILENAME
+// above. customFields/appFieldOrder used to live inside .api-config.json,
+// but that only exists for a folder that's connected to an API -- a
+// paper-only folder still needs to be able to add/require/delete/reorder
+// fields, so both moved here.
 const FORM_SCHEMA_FILENAME = ".form-schema.json";
 
 function formSchemaPath(folder) {
@@ -1293,10 +1294,11 @@ function writeFormSchema(folder, schema) {
 }
 
 // One-time migration, same precedent as get-tag-config's oldTagConfigPath
-// migration above: a folder whose custom fields were defined via the old
-// API-mapping screen (stored in .api-config.json's "customFields") gets a
-// fresh .form-schema.json seeded from them, plus the fields that were
-// hardcoded-required before this screen existed.
+// migration above: a folder whose custom fields/display order were defined
+// via the old API-mapping screen (stored in .api-config.json's
+// "customFields"/"appFieldOrder") gets a fresh .form-schema.json seeded
+// from them, plus the fields that were hardcoded-required before this
+// screen existed.
 function readFormSchema(folder) {
   const current = readFormSchemaFile(formSchemaPath(folder));
   if (current) {
@@ -1305,6 +1307,7 @@ function readFormSchema(folder) {
       removedFields: current.removedFields || [],
       requiredFields: current.requiredFields || DEFAULT_REQUIRED_FIELDS,
       customFields: current.customFields || [],
+      appFieldOrder: current.appFieldOrder || [],
     };
   }
   const apiConfig = readApiConfig(folder);
@@ -1312,6 +1315,7 @@ function readFormSchema(folder) {
     removedFields: [],
     requiredFields: DEFAULT_REQUIRED_FIELDS,
     customFields: (apiConfig && apiConfig.customFields) || [],
+    appFieldOrder: (apiConfig && apiConfig.appFieldOrder) || [],
   };
   writeFormSchema(folder, schema);
   return schema;
@@ -1458,10 +1462,10 @@ function resolveAppFormTarget(appForm, target, removedFields) {
     const dot = rest.indexOf(".");
     if (dot === -1) return null;
     const slot = rest.slice(0, dot);
-    // The remainder can itself be a nested path (e.g. "medicareParts.a" for
-    // a member:primary.medicareParts.a target, not just a flat "firstName"),
-    // so it's walked the same way appFieldTarget in application-form.js
-    // walks any other dotted path -- one level of nesting isn't enough here.
+    // The remainder can itself be a nested path (e.g. "health.height" for a
+    // member:primary.health.height target, not just a flat "firstName"), so
+    // it's walked the same way appFieldTarget in application-form.js walks
+    // any other dotted path -- one level of nesting isn't enough here.
     const path = rest.slice(dot + 1).split(".");
     const member = resolveOrCreateMemberForSlot(appForm, slot);
     let obj = member;

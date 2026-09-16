@@ -146,10 +146,13 @@ const GENDER_OPTIONS = [
   { value: "female", label: "Female" },
 ];
 
-const ROLE_OPTIONS = [
-  { value: "primary", label: "Primary member" },
-  { value: "spouse", label: "Spouse" },
-  { value: "child", label: "Child/Dependent" },
+// One choice, not four checkboxes -- matches the online form's own single
+// dropdown for which Medicare part (if any) a primary/spouse member has.
+const MEDICARE_OPTIONS = [
+  { value: "A", label: "Part A" },
+  { value: "B", label: "Part B" },
+  { value: "C", label: "Part C" },
+  { value: "D", label: "Part D" },
 ];
 
 function appUid() {
@@ -190,7 +193,10 @@ function makeBlankHouseholdMember(role) {
     gender: "",
     ssExempt: "",
     maritalStatus: "",
-    medicareParts: { a: false, b: false, c: false, d: false },
+    // A single choice ("A"/"B"/"C"/"D"/none), matching the online form's own
+    // dropdown -- see migrateMedicarePart for members read from a sidecar
+    // saved before this was collapsed from four separate checkboxes.
+    medicarePart: "",
     isAdult18Plus: false,
     signedOnPaper: false,
     health: makeBlankHealthRecord(),
@@ -199,7 +205,7 @@ function makeBlankHouseholdMember(role) {
     // field the office wants filed under "Primary member" or "Household
     // Member 2" rather than the household-level catch-all) -- see
     // .form-schema.json's "customFields" (each carries a "scope" naming
-    // which member it belongs to) and renderHouseholdMemberHtml. Always
+    // which member it belongs to) and renderMemberFieldsHtml. Always
     // present, same reasoning as appForm's own extraFields.
     extraFields: {},
   };
@@ -230,7 +236,11 @@ function makeBlankAppForm() {
       previousPlanName: "",
       previousPlanAnnualCost: "",
     },
-    householdMembers: [makeBlankHouseholdMember("primary")],
+    // A spouse slot always exists from the start, even blank -- the Spouse
+    // category is always shown (see renderApplicationFormHtml), and typing
+    // a name into it is what makes them "Member #2" for the health
+    // categories below, rather than a separate explicit "add spouse" step.
+    householdMembers: [makeBlankHouseholdMember("primary"), makeBlankHouseholdMember("spouse")],
     acknowledgment: { printedNameHeadOfHousehold: "" },
     // Flat key->value bag for fields mapped from an external source (e.g. the
     // Gravity Forms API import) that don't correspond to any of the fields
@@ -241,6 +251,20 @@ function makeBlankAppForm() {
     extraFields: {},
     meta: { createdAt: now, updatedAt: now, lastEditedBy: "" },
   };
+}
+
+// One-time, in-memory normalization for a file saved before every appForm
+// always got a spouse slot from the start (see makeBlankAppForm above) --
+// synthesizes a blank one so the Spouse category always has something to
+// render into, exactly like a brand-new application already would. Never
+// written back to disk on its own; it's carried forward the same way any
+// other in-memory-only default is, and persists for real the next time the
+// user actually edits something (saveAppForm always serializes the whole
+// appForm object).
+function ensureSpouseMember(form) {
+  if (form.householdMembers.some((m) => m.role === "spouse")) return;
+  const primaryIdx = form.householdMembers.findIndex((m) => m.role === "primary");
+  form.householdMembers.splice(primaryIdx + 1, 0, makeBlankHouseholdMember("spouse"));
 }
 
 // The catalog of identity-level fields a Gravity Forms field can connect to
@@ -255,7 +279,46 @@ function makeBlankAppForm() {
 // out of sync: 6 real household fields were missing from it) in renderer.js;
 // now application-form.js's own render calls below and renderer.js's mapping
 // modal and Manage Form Fields screen all read the same one.
+// Order and grouping mirror the Application tab's own category order
+// exactly (see renderApplicationFormHtml) -- Primary member, Spouse,
+// Household, Church -- so a folder that's never touched the reorder
+// controls sees the same default sequence everywhere. Household and
+// Church are two separate catalog scopes here even though both store into
+// the same `form.household` object (prefix "household." for both) --
+// CHURCH_FIELD_KEYS is what actually tells a church field's target apart
+// from a household one, since the prefix alone can't.
 const APP_FIELD_FIXED_GROUPS = [
+  {
+    group: "Primary member",
+    scope: "primary",
+    prefix: "member:primary.",
+    fields: [
+      { key: "firstName", label: "First name" },
+      { key: "initial", label: "Middle initial" },
+      { key: "lastName", label: "Last name" },
+      { key: "dob", label: "Date of birth" },
+      { key: "ssnLast4", label: "Last 4 of SSN" },
+      { key: "gender", label: "Gender" },
+      { key: "ssExempt", label: "Social Security exempt?" },
+      { key: "maritalStatus", label: "Marital status" },
+      { key: "medicarePart", label: "Medicare" },
+    ],
+  },
+  {
+    group: "Spouse",
+    scope: "spouse",
+    prefix: "member:spouse.",
+    fields: [
+      { key: "firstName", label: "First name" },
+      { key: "initial", label: "Middle initial" },
+      { key: "lastName", label: "Last name" },
+      { key: "dob", label: "Date of birth" },
+      { key: "gender", label: "Gender" },
+      { key: "ssExempt", label: "Social Security exempt?" },
+      { key: "maritalStatus", label: "Marital status" },
+      { key: "medicarePart", label: "Medicare" },
+    ],
+  },
   {
     group: "Household",
     scope: "household",
@@ -272,6 +335,13 @@ const APP_FIELD_FIXED_GROUPS = [
       { key: "effectiveStartDate", label: "Effective start date" },
       { key: "previousPlanName", label: "Previous medical aid plan" },
       { key: "previousPlanAnnualCost", label: "Previous plan annual cost" },
+    ],
+  },
+  {
+    group: "Church",
+    scope: "church",
+    prefix: "household.",
+    fields: [
       { key: "churchName", label: "Church name" },
       { key: "churchContactName", label: "Church contact" },
       { key: "churchContactPhone", label: "Church contact phone" },
@@ -282,44 +352,26 @@ const APP_FIELD_FIXED_GROUPS = [
       { key: "churchContactZip", label: "Church contact ZIP" },
     ],
   },
-  {
-    group: "Primary member",
-    scope: "primary",
-    prefix: "member:primary.",
-    fields: [
-      { key: "firstName", label: "First name" },
-      { key: "initial", label: "Middle initial" },
-      { key: "lastName", label: "Last name" },
-      { key: "dob", label: "Date of birth" },
-      { key: "ssnLast4", label: "Last 4 of SSN" },
-      { key: "gender", label: "Gender" },
-      { key: "ssExempt", label: "Social Security exempt?" },
-      { key: "maritalStatus", label: "Marital status" },
-      { key: "medicareParts.a", label: "Medicare Part A" },
-      { key: "medicareParts.b", label: "Medicare Part B" },
-      { key: "medicareParts.c", label: "Medicare Part C" },
-      { key: "medicareParts.d", label: "Medicare Part D" },
-    ],
-  },
-  {
-    group: "Spouse",
-    scope: "spouse",
-    prefix: "member:spouse.",
-    fields: [
-      { key: "firstName", label: "First name" },
-      { key: "initial", label: "Middle initial" },
-      { key: "lastName", label: "Last name" },
-      { key: "dob", label: "Date of birth" },
-      { key: "gender", label: "Gender" },
-      { key: "ssExempt", label: "Social Security exempt?" },
-      { key: "maritalStatus", label: "Marital status" },
-      { key: "medicareParts.a", label: "Medicare Part A" },
-      { key: "medicareParts.b", label: "Medicare Part B" },
-      { key: "medicareParts.c", label: "Medicare Part C" },
-      { key: "medicareParts.d", label: "Medicare Part D" },
-    ],
-  },
 ];
+
+// Which of household's fixed fields are "Church" fields -- the only way to
+// tell a Church-scoped fixed field's target apart from a Household one,
+// since both groups above share the same "household." prefix (they're
+// still the same underlying form.household object; Church is a purely
+// organizational split of it, not a separate storage location). Also used
+// to disambiguate a CUSTOM field's target, which is identical either way
+// ("custom:<key>") -- see the customScope tag buildNaturalAppFieldRows
+// attaches to each custom row instead.
+const CHURCH_FIELD_KEYS = new Set([
+  "churchName",
+  "churchContactName",
+  "churchContactPhone",
+  "churchContactEmailOrFax",
+  "churchContactAddress",
+  "churchContactCity",
+  "churchContactState",
+  "churchContactZip",
+]);
 
 // Same identity-field set as Primary/Spouse above, reused for every
 // household-member slot beyond those two.
@@ -336,13 +388,17 @@ const MEMBER_SLOT_FIELDS = [
 // field under: ..." choices) says which section it's categorized in and,
 // via customFieldTarget, which target string reaches its data: "household"
 // (or no scope at all, for a field created before per-member categorization
-// existed) is appForm's own flat extraFields bag; "primary"/"spouse"/
-// "slotN" is that specific member's own extraFields bag instead (see
-// main.js's resolveAppFormTarget/resolveOrCreateMemberForSlot) -- letting
-// e.g. two different household members each have their own value for a
-// same-named field, rather than sharing one household-wide slot.
+// existed) AND "church" both land in appForm's own flat extraFields bag --
+// there's no separate storage for a "church custom field", it's the exact
+// same bag as a household one, just labeled/grouped differently, the same
+// relationship Household/Church's fixed fields already have. "primary"/
+// "spouse"/"slotN" is that specific member's own extraFields bag instead
+// (see main.js's resolveAppFormTarget/resolveOrCreateMemberForSlot) --
+// letting e.g. two different household members each have their own value
+// for a same-named field, rather than sharing one household-wide slot.
 function customFieldScopeLabel(scope) {
   if (!scope || scope === "household") return "Household";
+  if (scope === "church") return "Church";
   if (scope === "primary") return "Primary member";
   if (scope === "spouse") return "Spouse";
   const m = /^slot(\d+)$/.exec(scope);
@@ -351,7 +407,8 @@ function customFieldScopeLabel(scope) {
 }
 
 function customFieldTarget(c) {
-  return !c.scope || c.scope === "household" ? `custom:${c.key}` : `membercustom:${c.scope}.${c.key}`;
+  const scope = c.scope || "household";
+  return scope === "household" || scope === "church" ? `custom:${c.key}` : `membercustom:${scope}.${c.key}`;
 }
 
 // The "natural" App-side row order before any manual reordering is applied:
@@ -370,7 +427,7 @@ function buildNaturalAppFieldRows(slotCount, customFields) {
   });
   const pushCustomsFor = (scope) => {
     (customsByScope.get(scope) || []).forEach((c) =>
-      rows.push({ id: customFieldTarget(c), label: `${customFieldScopeLabel(c.scope)} → ${c.label}`, customKey: c.key })
+      rows.push({ id: customFieldTarget(c), label: `${customFieldScopeLabel(c.scope)} → ${c.label}`, customKey: c.key, customScope: scope })
     );
     customsByScope.delete(scope);
   };
@@ -388,77 +445,78 @@ function buildNaturalAppFieldRows(slotCount, customFields) {
   return rows;
 }
 
-// Re-sorts `rows` (already in "natural" order) against whatever's already
-// in `order` (a saved/dragged sequence of row ids) -- a row NOT yet in
-// `order` (a field or slot added since the last save) is anchored right
-// after wherever its natural predecessor landed, rather than sorted past
-// every explicitly-ordered row to the very end. Shared by buildAppFieldRows
-// and buildAllAppFieldRows below, which differ only in whether a removed
-// field is filtered out first.
-function applyFieldOrder(rows, order) {
+// Every connectable App-side row, in final display order: starts from the
+// natural grouping above (with a deleted field filtered out -- see
+// isFieldRemoved -- since it's no longer a valid target anywhere), then
+// re-sorts whatever's already in `order` (a saved/dragged/reordered
+// sequence of row ids) among itself -- but a row NOT yet in `order` (a
+// field or slot added since the last save) is anchored right after
+// wherever its natural predecessor landed, rather than sorted past every
+// explicitly-ordered row to the very end.
+//
+// `removedFieldsOverride` lets a caller that's mid-edit of removedFields
+// itself (Manage Form Fields, via buildManageFieldSections below) filter
+// against its own in-progress draft instead of the last-saved
+// state.formSchema.removedFields isFieldRemoved would otherwise read --
+// without it, a field you just deleted in that screen wouldn't disappear
+// from its own list until after Save. Every other caller (the real
+// Application tab, the API mapping modal) omits it and gets the saved
+// schema, which is what they should always reflect.
+function buildAppFieldRows(slotCount, customFields, order, removedFieldsOverride) {
+  const natural = buildNaturalAppFieldRows(slotCount, customFields).filter((row) =>
+    removedFieldsOverride ? !removedFieldsOverride.includes(row.id) : !isFieldRemoved(row.id)
+  );
   const orderIndex = new Map((order || []).map((id, i) => [id, i]));
   let lastKnownPos = -1;
   let unorderedRun = 0;
-  const withPos = rows.map((row) => {
+  const withPos = natural.map((row) => {
     if (orderIndex.has(row.id)) {
       lastKnownPos = orderIndex.get(row.id);
       unorderedRun = 0;
       return { row, pos: lastKnownPos };
     }
     unorderedRun += 1;
-    return { row, pos: lastKnownPos + unorderedRun / (rows.length + 1) };
+    return { row, pos: lastKnownPos + unorderedRun / (natural.length + 1) };
   });
   return withPos.sort((a, b) => a.pos - b.pos).map((x) => x.row);
 }
 
-// Every connectable App-side row, in final display order -- a field removed
-// via Manage Form Fields is no longer a valid target, so it's filtered out
-// here. Used by the API mapping modal and the real Application tab (via
-// orderedScopeRows below), neither of which should ever surface a removed
-// field.
-function buildAppFieldRows(slotCount, customFields, order) {
-  const natural = buildNaturalAppFieldRows(slotCount, customFields).filter((row) => !isFieldRemoved(row.id));
-  return applyFieldOrder(natural, order);
-}
-
-// Same, but INCLUDING removed fields -- what Manage Form Fields needs,
-// since it has to show a removed field too (dimmed, with a Restore action).
-function buildAllAppFieldRows(slotCount, customFields, order) {
-  return applyFieldOrder(buildNaturalAppFieldRows(slotCount, customFields), order);
-}
-
-// The live cross-field display order set by the API mapping modal's
-// drag-reorder (state.apiConfig.appFieldOrder) -- reused by the actual
-// Application tab and Manage Form Fields below so reordering there reorders
-// what a reviewer sees everywhere, not just that one screen. Empty for a
-// folder that's never reordered anything (or never connected to an API at
-// all); buildAppFieldRows already falls back to natural order in that case.
+// The live cross-field display order (state.formSchema.appFieldOrder) --
+// set either by dragging/reordering in the API mapping modal or by the Up/
+// Down buttons in Manage Form Fields, both of which write to the same
+// list, so reordering in either screen reorders what a reviewer sees
+// everywhere. Empty for a folder that's never reordered anything;
+// buildAppFieldRows already falls back to natural order in that case.
 function currentAppFieldOrder() {
-  return (typeof state !== "undefined" && state.apiConfig && state.apiConfig.appFieldOrder) || [];
+  return (typeof state !== "undefined" && state.formSchema && state.formSchema.appFieldOrder) || [];
 }
 
-// True if `rowId` (an id from buildAppFieldRows/buildNaturalAppFieldRows)
-// belongs to the given catalog scope ("household", "primary", "spouse",
-// "slotN") -- lets a render function pull just its own slice of the one
-// global cross-field order back out, already in the correct relative
-// sequence since buildAppFieldRows resolves the full order in one pass.
-function rowBelongsToScope(rowId, scope) {
-  if (scope === "household") return rowId.startsWith("household.") || rowId.startsWith("custom:");
-  return rowId.startsWith(`member:${scope}.`) || rowId.startsWith(`membercustom:${scope}.`);
+// True if `row` (a row object from buildAppFieldRows/buildNaturalAppFieldRows)
+// belongs to the given catalog scope ("household", "church", "primary",
+// "spouse", "slotN") -- lets a render function pull just its own slice of
+// the one global cross-field order back out, already in the correct
+// relative sequence since buildAppFieldRows resolves the full order in one
+// pass. A custom row's target ("custom:<key>") is identical whether it's
+// household- or church-scoped, so those go by the customScope tag
+// buildNaturalAppFieldRows attached instead of the id string; a fixed
+// row's id is unambiguous EXCEPT that Household and Church share the same
+// "household." prefix, disambiguated by CHURCH_FIELD_KEYS.
+function rowBelongsToScope(row, scope) {
+  if (row.customKey) return (row.customScope || "household") === scope;
+  if (scope === "household" || scope === "church") {
+    if (!row.id.startsWith("household.")) return false;
+    const isChurchField = CHURCH_FIELD_KEYS.has(row.id.slice("household.".length));
+    return scope === "church" ? isChurchField : !isChurchField;
+  }
+  return row.id.startsWith(`member:${scope}.`) || row.id.startsWith(`membercustom:${scope}.`);
 }
 
 // One scope's fields (fixed + its own custom fields, interleaved), in the
-// current live display order -- what renderApplicationFormHtml/
-// renderHouseholdMemberHtml render from below, instead of each hardcoding
-// its own fixed sequence the way they used to.
-function orderedScopeRows(scope, slotCount, customFields, order) {
-  return buildAppFieldRows(slotCount, customFields, order).filter((row) => rowBelongsToScope(row.id, scope));
-}
-
-// Same, but including removed fields -- what Manage Form Fields' own list
-// needs (see buildAllAppFieldRows above).
-function orderedScopeRowsIncludingRemoved(scope, slotCount, customFields, order) {
-  return buildAllAppFieldRows(slotCount, customFields, order).filter((row) => rowBelongsToScope(row.id, scope));
+// current live display order -- what renderMemberFieldsHtml/
+// renderHouseholdFieldsHtml/Manage Form Fields render from below, instead
+// of each hardcoding its own fixed sequence the way they used to.
+function orderedScopeRows(scope, slotCount, customFields, order, removedFieldsOverride) {
+  return buildAppFieldRows(slotCount, customFields, order, removedFieldsOverride).filter((row) => rowBelongsToScope(row, scope));
 }
 
 // Same grouping as buildNaturalAppFieldRows, but keeping each group's rows
@@ -471,8 +529,13 @@ function orderedScopeRowsIncludingRemoved(scope, slotCount, customFields, order)
 // member → First name", from buildNaturalAppFieldRows), since Primary and
 // Spouse (and every Household Member N slot) share several identical field
 // labels that the section header alone doesn't disambiguate once you're
-// looking at just one row.
-function buildManageFieldSections(slotCount, customFields, order) {
+// looking at just one row. The SECTIONS themselves are also sorted by the
+// live order (where each scope's first field falls in the one global
+// sequence), not just the rows within them -- moving every Primary/Spouse
+// field above Household's in the mapping modal moves those whole sections
+// above Household here too, rather than leaving Household pinned at the
+// top regardless of how everything inside it got reordered.
+function buildManageFieldSections(slotCount, customFields, order, removedFields) {
   const scopeSections = APP_FIELD_FIXED_GROUPS.map((g) => ({ group: g.group, scope: g.scope }));
   for (let slot = 2; slot <= slotCount; slot++) {
     scopeSections.push({ group: `Household Member ${slot}`, scope: `slot${slot}` });
@@ -487,11 +550,20 @@ function buildManageFieldSections(slotCount, customFields, order) {
       scopeSections.push({ group: customFieldScopeLabel(scope), scope });
     }
   });
-  return scopeSections.map((s) => ({
+
+  const fullRows = buildAppFieldRows(slotCount, customFields, order, removedFields);
+  const scopeSortKey = (scope) => {
+    const idx = fullRows.findIndex((row) => rowBelongsToScope(row, scope));
+    return idx === -1 ? Infinity : idx; // a scope with no fields left sinks to the end rather than staying pinned by declaration order
+  };
+
+  const sections = scopeSections.map((s) => ({
     group: s.group,
     scope: s.scope,
-    rows: orderedScopeRowsIncludingRemoved(s.scope, slotCount, customFields, order).map((row) => ({ ...row, isCustom: !!row.customKey })),
+    rows: orderedScopeRows(s.scope, slotCount, customFields, order, removedFields).map((row) => ({ ...row, isCustom: !!row.customKey })),
   }));
+  sections.sort((a, b) => scopeSortKey(a.scope) - scopeSortKey(b.scope));
+  return sections;
 }
 
 // The highest household-member slot any custom field is currently scoped
@@ -568,7 +640,7 @@ function memberFieldScope(member) {
 // never creates a member as a side effect of just checking whether a
 // required field is filled in. Resolves a target the same way that pair
 // does: "household.<key>" against the root, "member:<scope>.<key>" against
-// that member (the <key> can itself be dotted, e.g. "medicareParts.a"),
+// that member (the <key> can itself be dotted, for a nested field),
 // "membercustom:<scope>.<key>" against that member's own extraFields, or
 // "custom:<key>" against the household-level extraFields bag.
 function findMemberForSlot(form, slot) {
@@ -766,6 +838,23 @@ function renderHealthQuestionnaireHtml(member, file) {
     </div>`;
 }
 
+// One-time, in-memory migration for a member saved before Medicare was
+// collapsed from four independent checkboxes into one dropdown (see
+// MEDICARE_OPTIONS/makeBlankHouseholdMember) -- picks whichever part was
+// checked (first one wins in the unlikely case more than one was) so a
+// scan already entered under the old shape doesn't just go blank. Only
+// runs once per member: `medicarePart` being present at all (even "") means
+// either a fresh member or one already migrated, so a deliberate later
+// choice of "none" is never overwritten back from stale legacy data. The
+// old medicareParts object itself is left alone on disk either way --
+// same "orphaned data sits harmlessly" precedent as any other removed
+// field.
+function migrateMedicarePart(member) {
+  if (member.medicarePart !== undefined) return;
+  const mp = member.medicareParts;
+  member.medicarePart = mp && mp.a ? "A" : mp && mp.b ? "B" : mp && mp.c ? "C" : mp && mp.d ? "D" : "";
+}
+
 // Every schema-addressable field for one member -- identity fields,
 // Social Security/marital status/Medicare (primary & spouse only), and any
 // custom fields scoped to them -- rendered as ONE grid in the current live
@@ -778,6 +867,7 @@ function renderHealthQuestionnaireHtml(member, file) {
 function renderMemberFieldsHtml(member, file) {
   const form = file.appForm;
   const scope = memberFieldScope(member);
+  migrateMedicarePart(member);
   const FIELD_RENDERERS = {
     firstName: () => appTextField(form, member.id, "firstName", "First name", { required: !!scope && isFieldRequired(`member:${scope}.firstName`) }),
     initial: () => appTextField(form, member.id, "initial", "MI"),
@@ -787,10 +877,7 @@ function renderMemberFieldsHtml(member, file) {
     gender: () => appSelectField(form, member.id, "gender", "Gender", GENDER_OPTIONS),
     ssExempt: () => appSelectField(form, member.id, "ssExempt", "Social Security exempt?", YES_NO_OPTIONS),
     maritalStatus: () => appTextField(form, member.id, "maritalStatus", "Marital status", { required: !!scope && isFieldRequired(`member:${scope}.maritalStatus`) }),
-    "medicareParts.a": () => appCheckboxField(form, member.id, "medicareParts.a", "Medicare Part A"),
-    "medicareParts.b": () => appCheckboxField(form, member.id, "medicareParts.b", "Medicare Part B"),
-    "medicareParts.c": () => appCheckboxField(form, member.id, "medicareParts.c", "Medicare Part C"),
-    "medicareParts.d": () => appCheckboxField(form, member.id, "medicareParts.d", "Medicare Part D"),
+    medicarePart: () => appSelectField(form, member.id, "medicarePart", "Medicare", MEDICARE_OPTIONS),
   };
   if (!scope) {
     return ["firstName", "initial", "lastName", "dob", "ssnLast4", "gender"].map((k) => FIELD_RENDERERS[k]()).join("");
@@ -811,42 +898,59 @@ function renderMemberFieldsHtml(member, file) {
     .join("");
 }
 
-function renderHouseholdMemberHtml(member, file) {
+// Primary/Spouse are always-present fixed slots (see ensureSpouseMember),
+// each its own top-level category -- just their identity/SS/marital/
+// Medicare fields (renderMemberFieldsHtml) plus "Signed on paper form"
+// (both are always adults by definition, so there's no 18+ checkbox and,
+// unlike a dependent, no Remove button -- clearing the Spouse category's
+// fields back to blank is how you "remove" a spouse, since a spouse with
+// no name isn't counted as Member #2 -- see renderApplicationFormHtml).
+function renderPrimaryOrSpouseCategoryHtml(member, file) {
   const form = file.appForm;
-  const isPrimaryOrSpouse = member.role === "primary" || member.role === "spouse";
-  const isAdult = isPrimaryOrSpouse || member.isAdult18Plus;
   return `
-    <div class="bm-appform-member">
-      <div class="bm-appform-member-header">
-        <div class="bm-appform-grid bm-appform-member-identity">
-          ${appSelectField(form, member.id, "role", "Role", ROLE_OPTIONS, { kind: "structural" })}
-          ${renderMemberFieldsHtml(member, file)}
-        </div>
-        <button class="bm-btn bm-btn-ghost bm-btn-sm" data-action="remove-member" data-member="${member.id}" title="Remove this household member">${ICONS.x} Remove</button>
-      </div>
-      ${
-        isPrimaryOrSpouse
-          ? ""
-          : `<div class="bm-appform-checkbox-row">
-              ${appCheckboxField(form, member.id, "isAdult18Plus", "18 years or older", { kind: "structural" })}
-            </div>`
-      }
-      ${
-        isAdult
-          ? `<div class="bm-appform-checkbox-row">${appCheckboxField(form, member.id, "signedOnPaper", "Signed on paper form")}</div>`
-          : ""
-      }
-      ${renderHealthQuestionnaireHtml(member, file)}
+    <div class="bm-appform-grid">
+      ${renderMemberFieldsHtml(member, file)}
+    </div>
+    <div class="bm-appform-checkbox-row">
+      ${appCheckboxField(form, member.id, "signedOnPaper", "Signed on paper form")}
     </div>`;
 }
 
-// Every household-level field -- the 19 fixed fields (address/church/plan
-// info combined; the mapping modal's own catalog has never distinguished a
-// separate "Church" scope from "Household", so the on-screen split doesn't
-// either) plus any household-scoped custom fields -- rendered as ONE grid
-// in the current live display order. See renderMemberFieldsHtml for the
-// per-member equivalent.
-function renderHouseholdFieldsHtml(form) {
+// Member #3+ (anyone beyond primary/spouse, added via "Add household
+// member") don't get their own always-present identity category the way
+// Primary/Spouse do -- their identity fields (renderMemberFieldsHtml, scope
+// null so no SS/marital/Medicare) are bundled directly into their own
+// "Member #N health" category instead, alongside the Remove button, the
+// 18+/signed-on-paper checkboxes, and the health questionnaire itself.
+function renderDependentMemberCategoryHtml(member, file) {
+  const form = file.appForm;
+  const isAdult = !!member.isAdult18Plus;
+  return `
+    <div class="bm-appform-member-header">
+      <div class="bm-appform-grid bm-appform-member-identity">
+        ${renderMemberFieldsHtml(member, file)}
+      </div>
+      <button class="bm-btn bm-btn-ghost bm-btn-sm" data-action="remove-member" data-member="${member.id}" title="Remove this household member">${ICONS.x} Remove</button>
+    </div>
+    <div class="bm-appform-checkbox-row">
+      ${appCheckboxField(form, member.id, "isAdult18Plus", "18 years or older", { kind: "structural" })}
+    </div>
+    ${
+      isAdult
+        ? `<div class="bm-appform-checkbox-row">${appCheckboxField(form, member.id, "signedOnPaper", "Signed on paper form")}</div>`
+        : ""
+    }
+    ${renderHealthQuestionnaireHtml(member, file)}`;
+}
+
+// Household and Church fields, in the current live display order --
+// `scope` is "household" or "church" (see APP_FIELD_FIXED_GROUPS/
+// CHURCH_FIELD_KEYS above; both are real catalog scopes now, not just a
+// presentational split, so reordering/removing/requiring/adding a custom
+// field under one is independent of the other everywhere -- Manage Form
+// Fields, the API mapping modal, and here). See renderMemberFieldsHtml for
+// the per-member equivalent.
+function renderHouseholdFieldsHtml(form, scope = "household") {
   const reqH = (key) => isFieldRequired(`household.${key}`);
   const FIELD_RENDERERS = {
     address: () => appTextField(form, null, "household.address", "Address", { required: reqH("address"), wide: true }),
@@ -872,10 +976,10 @@ function renderHouseholdFieldsHtml(form) {
   const customFieldDefs = (typeof state !== "undefined" && state.customFieldDefs) || [];
   const slotCount = manageFieldsSlotCount(customFieldDefs);
   const order = currentAppFieldOrder();
-  return orderedScopeRows("household", slotCount, customFieldDefs, order)
+  return orderedScopeRows(scope, slotCount, customFieldDefs, order)
     .map((row) => {
       if (row.customKey) {
-        const def = customFieldDefs.find((c) => c.key === row.customKey && (!c.scope || c.scope === "household"));
+        const def = customFieldDefs.find((c) => c.key === row.customKey && (c.scope || "household") === scope);
         return def ? appTextField(form, null, `extraFields.${def.key}`, def.label, { wide: true }) : "";
       }
       const renderer = FIELD_RENDERERS[row.id.slice("household.".length)];
@@ -884,26 +988,99 @@ function renderHouseholdFieldsHtml(form) {
     .join("");
 }
 
+// True if `member` has anything flagged in their health questionnaire (a
+// condition marked present, or free-text surgical history/medications) --
+// the default-open heuristic for a health category below: nothing to
+// review yet, stay collapsed; something's there, or a name hasn't even
+// been entered yet for a new dependent, open up so it's not missed.
+function memberHasHealthData(member) {
+  const h = member.health;
+  if (!h) return false;
+  const anyConditionPresent = CONDITION_CATEGORIES.some((cat) => {
+    const catState = h.conditions[cat.key];
+    if (!catState) return false;
+    return cat.conditions.some((c) => catState[c.key] && catState[c.key].present) || (catState.other && catState.other.trim());
+  });
+  return (
+    anyConditionPresent ||
+    !!(h.pastSurgicalHistoryText && h.pastSurgicalHistoryText.trim()) ||
+    !!(h.currentMedicationsText && h.currentMedicationsText.trim())
+  );
+}
+
+function memberHasName(member) {
+  return !!((member.firstName || "").trim() || (member.lastName || "").trim());
+}
+
+// Explicit open/closed overrides for the Application tab's own top-level
+// categories (Primary member, Spouse, Household, Church, and each member's
+// health) once a reviewer has manually toggled one -- separate from
+// expandedHealthCategories below (the health questionnaire's own nested
+// condition sub-categories), since these categories default OPEN while the
+// health ones default CLOSED-unless-there's-something-to-review, two
+// different default polarities one Set of "has been expanded" can't
+// express. Not part of the saved schema, same reasoning as
+// expandedHealthCategories.
+const categoryOpenOverrides = new Map();
+
+function renderAppCategoryHtml(file, key, label, innerHtml, defaultOpen) {
+  const expandKey = `${file.path}:category:${key}`;
+  const open = categoryOpenOverrides.has(expandKey) ? categoryOpenOverrides.get(expandKey) : defaultOpen;
+  return `
+    <details class="bm-appform-toplevel-category" data-expand-key="${expandKey}" ${open ? "open" : ""}>
+      <summary>${escapeHtml(label)}</summary>
+      <div class="bm-appform-category-body">${innerHtml}</div>
+    </details>`;
+}
+
+// The org's own paper-form category order: Primary member, Spouse,
+// Household, Church, then Primary member health, followed by one
+// collapsible health category per additional member -- Member #2 is the
+// spouse (only once they actually have a name; an untouched blank spouse
+// slot isn't "a member" yet), Member #3+ are whoever's in the household
+// members list beyond primary/spouse, in that list's order, bundling each
+// one's identity fields together with their health questionnaire (see
+// renderDependentMemberCategoryHtml) since they don't get a separate
+// always-present identity category the way primary/spouse do.
 function renderApplicationFormHtml(file) {
   const form = file.appForm || (file.appForm = makeBlankAppForm());
+  ensureSpouseMember(form);
   const missing = countMissingRequiredFields(file);
+  const primary = form.householdMembers.find((m) => m.role === "primary");
+  const spouse = form.householdMembers.find((m) => m.role === "spouse");
+  const others = form.householdMembers.filter((m) => m.role !== "primary" && m.role !== "spouse");
+
+  const categories = [
+    renderAppCategoryHtml(file, "primary", "Primary member", renderPrimaryOrSpouseCategoryHtml(primary, file), true),
+    renderAppCategoryHtml(file, "spouse", "Spouse", renderPrimaryOrSpouseCategoryHtml(spouse, file), true),
+    renderAppCategoryHtml(file, "household", "Household", `<div class="bm-appform-grid">${renderHouseholdFieldsHtml(form, "household")}</div>`, true),
+    renderAppCategoryHtml(file, "church", "Church", `<div class="bm-appform-grid">${renderHouseholdFieldsHtml(form, "church")}</div>`, true),
+    renderAppCategoryHtml(file, "primary-health", "Primary member health", renderHealthQuestionnaireHtml(primary, file), memberHasHealthData(primary)),
+  ];
+  if (memberHasName(spouse)) {
+    categories.push(
+      renderAppCategoryHtml(file, "member-2-health", "Member #2 health", renderHealthQuestionnaireHtml(spouse, file), memberHasHealthData(spouse))
+    );
+  }
+  others.forEach((m, i) => {
+    const num = i + 3;
+    categories.push(
+      renderAppCategoryHtml(
+        file,
+        `member-${num}-health`,
+        `Member #${num} health`,
+        renderDependentMemberCategoryHtml(m, file),
+        !memberHasName(m) || memberHasHealthData(m)
+      )
+    );
+  });
+
   return `
     <div class="bm-appform-badge${missing === 0 ? " bm-appform-badge--ok" : ""}">
       ${missing === 0 ? "All required fields complete" : `${missing} required field${missing === 1 ? "" : "s"} missing`}
     </div>
-    <div>
-      <div class="bm-section-label">Household</div>
-      <div class="bm-appform-grid">
-        ${renderHouseholdFieldsHtml(form)}
-      </div>
-    </div>
-    <div>
-      <div class="bm-section-label">Household members</div>
-      <div class="bm-appform-members">
-        ${form.householdMembers.map((m) => renderHouseholdMemberHtml(m, file)).join("")}
-      </div>
-      <button class="bm-btn bm-btn-ghost bm-btn-sm" data-action="add-member">${ICONS.plus} Add household member</button>
-    </div>
+    ${categories.join("")}
+    <button class="bm-btn bm-btn-ghost bm-btn-sm" data-action="add-member">${ICONS.plus} Add household member</button>
     <div>
       <div class="bm-section-label">Acknowledgments</div>
       <div class="bm-appform-grid">
@@ -1015,6 +1192,12 @@ function wireApplicationForm(panel, file) {
       const key = details.dataset.expandKey;
       if (details.open) expandedHealthCategories.add(key);
       else expandedHealthCategories.delete(key);
+    });
+  });
+
+  panel.querySelectorAll(".bm-appform-toplevel-category").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      categoryOpenOverrides.set(details.dataset.expandKey, details.open);
     });
   });
 }

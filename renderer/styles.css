@@ -681,11 +681,6 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-appform-badge--ok { color: var(--accent-text); background: var(--green-100); }
 .bm-appform-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: var(--space-3); }
 .bm-appform-wide { grid-column: 1 / -1; }
-.bm-appform-members { display: flex; flex-direction: column; gap: var(--space-4); margin-bottom: var(--space-3); }
-.bm-appform-member {
-  border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: var(--space-4);
-  display: flex; flex-direction: column; gap: var(--space-3);
-}
 .bm-appform-member-header { display: flex; align-items: flex-start; gap: var(--space-3); }
 .bm-appform-member-identity { flex: 1; }
 .bm-appform-checkbox-row { display: flex; flex-wrap: wrap; gap: var(--space-4); }
@@ -700,6 +695,22 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-appform-conditions { display: flex; flex-direction: column; gap: var(--space-2); }
 .bm-appform-condition-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
 .bm-appform-condition-label { font-size: 13px; color: var(--text-body); flex: 1; min-width: 160px; }
+
+/* The Application tab's own top-level categories (Primary member, Spouse,
+   Household, Church, and each member's health, see renderAppCategoryHtml)
+   -- a bigger, more prominent <details> box than the nested condition
+   sub-categories (.bm-appform-category) above, since these ARE the page
+   now rather than something nested inside a member card. */
+.bm-appform-toplevel-category {
+  border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: var(--space-4);
+}
+.bm-appform-toplevel-category + .bm-appform-toplevel-category { margin-top: var(--space-3); }
+.bm-appform-toplevel-category summary {
+  cursor: pointer; font-family: var(--font-condensed); font-size: 13px; letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--text-caption); font-weight: 500;
+}
+.bm-appform-toplevel-category[open] summary { margin-bottom: var(--space-3); }
+.bm-appform-category-body { display: flex; flex-direction: column; gap: var(--space-3); }
 
 /* Nothing selected. Two shapes (see renderPreviewEmpty): no folder open at
    all keeps the plain centered icon/message (.bm-preview-empty-inner
@@ -921,10 +932,15 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-manage-field-row {
   display: flex; align-items: center; gap: var(--space-3); padding: 7px 0; font-size: 13px; color: var(--text-body);
 }
-.bm-manage-field-row.removed { opacity: 0.55; }
+.bm-manage-field-reorder { display: flex; flex-direction: column; flex-shrink: 0; gap: 1px; }
+.bm-manage-field-reorder-btn {
+  display: flex; align-items: center; justify-content: center; width: 20px; height: 14px; padding: 0;
+  border: none; background: none; color: var(--text-muted); cursor: pointer; border-radius: 3px;
+}
+.bm-manage-field-reorder-btn:hover:not(:disabled) { background: var(--green-100); color: var(--accent-text); }
+.bm-manage-field-reorder-btn:disabled { opacity: 0.25; cursor: default; }
 .bm-manage-field-required { flex-shrink: 0; width: 92px; }
 .bm-manage-field-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bm-manage-field-label em { color: var(--text-muted); font-style: normal; }
 .bm-manage-field-add-row { display: flex; gap: var(--space-2); align-items: center; }
 .bm-manage-field-add-row .bm-input { flex: 1; }
 .bm-manage-field-add-row .bm-select { width: 180px; flex-shrink: 0; }
