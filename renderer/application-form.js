@@ -149,6 +149,7 @@ const GENDER_OPTIONS = [
 // One choice, not four checkboxes -- matches the online form's own single
 // dropdown for which Medicare part (if any) a primary/spouse member has.
 const MEDICARE_OPTIONS = [
+  { value: "none", label: "None" },
   { value: "A", label: "Part A" },
   { value: "B", label: "Part B" },
   { value: "C", label: "Part C" },
@@ -384,6 +385,69 @@ const MEMBER_SLOT_FIELDS = [
   { key: "gender", label: "Gender" },
 ];
 
+// Every leaf of a member's Health History Questionnaire (renderHealthQuestionnaireHtml/
+// renderConditionCategoryHtml), as one catalog row per storage key -- same
+// "one row = one target = one value" shape as MEMBER_SLOT_FIELDS above, just
+// generated from CONDITION_CATEGORIES instead of hand-listed, since that's
+// already the single source of truth for the condition list. `key` is
+// relative to "health." (joined with a member's scope by healthFieldRows
+// below to form the real "member:<scope>.health...." target); `label` chains
+// through the condition category the same way a fixed-field row's label
+// carries its group ("Primary member → First name"), since a bare condition
+// name alone doesn't say which of the 12 categories it's under.
+const HEALTH_FIELD_DEFS = (() => {
+  const defs = [
+    { key: "health.height", label: "Height" },
+    { key: "health.weight", label: "Weight" },
+    { key: "health.tobaccoUse", label: "Vaping or tobacco use?" },
+    { key: "health.noPastMedicalHistory", label: "No past medical history" },
+  ];
+  CONDITION_CATEGORIES.forEach((cat) => {
+    cat.conditions.forEach((c) => {
+      defs.push({ key: `health.conditions.${cat.key}.${c.key}.present`, label: `${cat.label} → ${c.label} (has this)` });
+      defs.push({ key: `health.conditions.${cat.key}.${c.key}.expense5k`, label: `${cat.label} → ${c.label} ($5,000+/yr)` });
+    });
+    defs.push({ key: `health.conditions.${cat.key}.other`, label: `${cat.label} → Other` });
+  });
+  defs.push(
+    { key: "health.noPastSurgicalHistory", label: "No past surgical history" },
+    { key: "health.pastSurgicalHistoryText", label: "Past surgeries" },
+    { key: "health.noMedications", label: "No current medications" },
+    { key: "health.currentMedicationsText", label: "Current medications" }
+  );
+  return defs;
+})();
+
+// The Manage Form Fields/API mapping section label for a member scope's
+// health rows -- kept as its own section rather than folded into that
+// member's identity section (see buildManageFieldSections). Named to match
+// renderApplicationFormHtml's own review-tab category labels for a
+// DEPENDENT ("Member #3 health", "Member #4 health", ...) since the online
+// Gravity Forms fields being mapped here are themselves labeled by member
+// NUMBER, so a schema-level "slot2 health" name would leave staff unable to
+// tell which online field goes where -- slotK is always household member
+// K+1 here since ensureSpouseMember/applyGfEntryToAppForm both guarantee
+// primary+spouse occupy #1/#2 before any dependent slot exists. Primary and
+// Spouse are named after their own fixed, always-named identity slot instead
+// ("Primary member health"/"Spouse health") rather than "#1"/"#2", since
+// neither one has a "name" field of its own the way a numbered dependent's
+// category implicitly does -- there's nothing else to call that slot.
+function healthGroupLabel(scope) {
+  if (scope === "primary") return "Primary member health";
+  if (scope === "spouse") return "Spouse health";
+  const m = /^slot(\d+)$/.exec(scope);
+  return m ? `Member #${Number(m[1]) + 1} health` : "Health";
+}
+
+// A member scope's health rows, ready to push into buildNaturalAppFieldRows'
+// flat row list -- id format ("member:<scope>.health....") matches every
+// other member-scoped row exactly, so buildAppFieldRows/isFieldRemoved/
+// isFieldRequired/resolveAppFormTarget all handle them with no special-casing.
+function healthFieldRows(scope) {
+  const label = healthGroupLabel(scope);
+  return HEALTH_FIELD_DEFS.map((f) => ({ id: `member:${scope}.${f.key}`, label: `${label} → ${f.label}` }));
+}
+
 // A custom field's scope (see the mapping/Manage Form Fields "add as a new
 // field under: ..." choices) says which section it's categorized in and,
 // via customFieldTarget, which target string reaches its data: "household"
@@ -401,14 +465,60 @@ function customFieldScopeLabel(scope) {
   if (scope === "church") return "Church";
   if (scope === "primary") return "Primary member";
   if (scope === "spouse") return "Spouse";
+  const healthMatch = /^(.+)-health$/.exec(scope);
+  if (healthMatch) return healthGroupLabel(healthMatch[1]);
+  // A legacy bare "slotN" scope (from before identity/health merged into one
+  // section for a dependent -- see newFieldScopeOptions) reports the SAME
+  // label as "slotN-health" now, since that's the only section it shows in.
   const m = /^slot(\d+)$/.exec(scope);
-  if (m) return `Household Member ${m[1]}`;
+  if (m) return healthGroupLabel(scope);
   return "New field";
 }
 
+// A "<scope>-health" custom field scope (see newFieldScopeOptions) still
+// stores into that member's own regular extraFields bag, same as a plain
+// "<scope>"-scoped one -- "-health" only changes which SECTION it's
+// categorized/displayed under (see rowBelongsToScope/buildManageFieldSections),
+// there's no separate storage bag for "this member's health-categorized
+// custom fields" the way Household/Church share one bag but display
+// separately. Key collisions across a member's plain vs "-health" custom
+// fields can't happen since addManageField/addMappingCustomField already
+// enforce key uniqueness across ALL custom fields, not per-scope.
 function customFieldTarget(c) {
   const scope = c.scope || "household";
-  return scope === "household" || scope === "church" ? `custom:${c.key}` : `membercustom:${scope}.${c.key}`;
+  if (scope === "household" || scope === "church") return `custom:${c.key}`;
+  const healthMatch = /^(.+)-health$/.exec(scope);
+  return `membercustom:${healthMatch ? healthMatch[1] : scope}.${c.key}`;
+}
+
+// Every scope a brand-new custom field can be categorized under, in the
+// order the Application tab's own categories appear -- each identity scope
+// immediately followed by its health counterpart, so "Primary member health"
+// is right there next to "Primary member" rather than buried at the end.
+// Shared by the API mapping modal's "add as a new field under: ..." choices
+// and Manage Form Fields' add-field scope <select> (see renderer.js), so the
+// two screens never drift into offering a different set of scopes.
+//
+// Primary/Spouse get two separate choices (identity vs health) because
+// renderApplicationFormHtml gives them two separate review-tab boxes. A
+// dependent slot gets only ONE -- its "Member #N health" box on the review
+// tab already holds both identity and health fields together (see
+// renderDependentMemberCategoryHtml), so offering a second "Household Member
+// N" choice here would just be a place to add a field that could never
+// actually match how it renders.
+function newFieldScopeOptions(slotCount) {
+  const opts = [
+    { value: "primary", label: "Primary member" },
+    { value: "primary-health", label: healthGroupLabel("primary") },
+    { value: "spouse", label: "Spouse" },
+    { value: "spouse-health", label: healthGroupLabel("spouse") },
+    { value: "household", label: "Household" },
+    { value: "church", label: "Church" },
+  ];
+  for (let slot = 2; slot <= slotCount; slot++) {
+    opts.push({ value: `slot${slot}-health`, label: healthGroupLabel(`slot${slot}`) });
+  }
+  return opts;
 }
 
 // The "natural" App-side row order before any manual reordering is applied:
@@ -434,10 +544,20 @@ function buildNaturalAppFieldRows(slotCount, customFields) {
   APP_FIELD_FIXED_GROUPS.forEach((g) => {
     g.fields.forEach((f) => rows.push({ id: `${g.prefix}${f.key}`, label: `${g.group} → ${f.label}` }));
     pushCustomsFor(g.scope);
+    if (g.scope === "primary" || g.scope === "spouse") {
+      rows.push(...healthFieldRows(g.scope));
+      pushCustomsFor(`${g.scope}-health`);
+    }
   });
   for (let slot = 2; slot <= slotCount; slot++) {
-    MEMBER_SLOT_FIELDS.forEach((f) => rows.push({ id: `member:slot${slot}.${f.key}`, label: `Household Member ${slot} → ${f.label}` }));
-    pushCustomsFor(`slot${slot}`);
+    // Labeled with the SAME group as this slot's health fields below (not
+    // "Household Member N") since the two are one merged section/review-tab
+    // box for a dependent -- see newFieldScopeOptions above.
+    const slotLabel = healthGroupLabel(`slot${slot}`);
+    MEMBER_SLOT_FIELDS.forEach((f) => rows.push({ id: `member:slot${slot}.${f.key}`, label: `${slotLabel} → ${f.label}` }));
+    pushCustomsFor(`slot${slot}`); // legacy bare-"slotN" custom fields, if any -- see rowBelongsToScope
+    rows.push(...healthFieldRows(`slot${slot}`));
+    pushCustomsFor(`slot${slot}-health`);
   }
   // Anything left (a custom field whose scope's slot doesn't currently
   // exist) still needs to show up somewhere rather than vanish.
@@ -500,14 +620,38 @@ function currentAppFieldOrder() {
 // household- or church-scoped, so those go by the customScope tag
 // buildNaturalAppFieldRows attached instead of the id string; a fixed
 // row's id is unambiguous EXCEPT that Household and Church share the same
-// "household." prefix, disambiguated by CHURCH_FIELD_KEYS.
+// "household." prefix, disambiguated by CHURCH_FIELD_KEYS -- and a member's
+// identity fields share their "member:<scope>." prefix with that same
+// member's health fields, disambiguated the same way by a "health." check,
+// via the virtual "<scope>-health" scope healthFieldRows' rows are meant to
+// be pulled out under (see buildManageFieldSections). For a dependent slot
+// specifically, "<slot>-health" swallows the WHOLE "member:<slot>." prefix
+// (identity included), not just its health rows -- Primary/Spouse keep
+// identity and health as two separate scopes/review-tab boxes, but a
+// dependent has only one box for both (see newFieldScopeOptions), so there's
+// no separate plain "slotN" scope left to split rows into for them.
 function rowBelongsToScope(row, scope) {
-  if (row.customKey) return (row.customScope || "household") === scope;
+  if (row.customKey) {
+    const customScope = row.customScope || "household";
+    if (customScope === scope) return true;
+    // A legacy custom field left scoped to bare "slotN" (from before
+    // identity/health merged into one section for dependents) still belongs
+    // to that slot's merged "-health" section now.
+    const slotHealthMatch = /^slot(\d+)-health$/.exec(scope);
+    return !!slotHealthMatch && customScope === `slot${slotHealthMatch[1]}`;
+  }
   if (scope === "household" || scope === "church") {
     if (!row.id.startsWith("household.")) return false;
     const isChurchField = CHURCH_FIELD_KEYS.has(row.id.slice("household.".length));
     return scope === "church" ? isChurchField : !isChurchField;
   }
+  const healthMatch = /^(.+)-health$/.exec(scope);
+  if (healthMatch) {
+    const baseScope = healthMatch[1];
+    if (/^slot\d+$/.test(baseScope)) return row.id.startsWith(`member:${baseScope}.`);
+    return row.id.startsWith(`member:${baseScope}.health.`);
+  }
+  if (row.id.startsWith(`member:${scope}.health.`)) return false;
   return row.id.startsWith(`member:${scope}.`) || row.id.startsWith(`membercustom:${scope}.`);
 }
 
@@ -536,9 +680,17 @@ function orderedScopeRows(scope, slotCount, customFields, order, removedFieldsOv
 // above Household here too, rather than leaving Household pinned at the
 // top regardless of how everything inside it got reordered.
 function buildManageFieldSections(slotCount, customFields, order, removedFields) {
-  const scopeSections = APP_FIELD_FIXED_GROUPS.map((g) => ({ group: g.group, scope: g.scope }));
+  const scopeSections = [];
+  APP_FIELD_FIXED_GROUPS.forEach((g) => {
+    scopeSections.push({ group: g.group, scope: g.scope });
+    if (g.scope === "primary" || g.scope === "spouse") {
+      scopeSections.push({ group: healthGroupLabel(g.scope), scope: `${g.scope}-health` });
+    }
+  });
   for (let slot = 2; slot <= slotCount; slot++) {
-    scopeSections.push({ group: `Household Member ${slot}`, scope: `slot${slot}` });
+    // One merged section per dependent -- see newFieldScopeOptions/
+    // rowBelongsToScope; no separate "Household Member N" identity section.
+    scopeSections.push({ group: healthGroupLabel(`slot${slot}`), scope: `slot${slot}-health` });
   }
   // A custom field whose scope has no matching fixed group (e.g. a slot
   // nothing else references any more) still needs its own section.
@@ -569,12 +721,15 @@ function buildManageFieldSections(slotCount, customFields, order, removedFields)
 // The highest household-member slot any custom field is currently scoped
 // to -- Manage Form Fields has no "add a slot" action of its own (that's an
 // API-mapping-specific concept, tied to a numbered import slot), so it only
-// ever shows a Household Member N section if a custom field already put
-// something there.
+// ever shows a dependent's section if a custom field already put something
+// there. Matches "slotN" (a legacy bare-scoped custom field) AND "slotN-health"
+// (the normal, merged scope every dependent's custom fields use now -- see
+// newFieldScopeOptions) -- missing the latter would make a slot whose ONLY
+// custom fields are health-categorized (the common case) invisible here.
 function manageFieldsSlotCount(customFields) {
   let max = 1;
   (customFields || []).forEach((c) => {
-    const m = /^slot(\d+)$/.exec(c.scope || "");
+    const m = /^slot(\d+)(?:-health)?$/.exec(c.scope || "");
     if (m) max = Math.max(max, Number(m[1]));
   });
   return max;
@@ -774,34 +929,48 @@ function appCheckboxField(form, memberId, field, label, opts = {}) {
 
 // ---- Rendering ----
 
-function renderConditionCategoryHtml(cat, member, file) {
+// `scope` (from memberFieldScope, null for a hand-added child never tied to
+// an import slot) is whether this member participates in the removed/
+// required catalog at all -- see healthRemoved below and the identical
+// bypass renderMemberFieldsHtml already applies to identity fields for the
+// same kind of member.
+function renderConditionCategoryHtml(cat, member, file, scope) {
   const catState = member.health.conditions[cat.key];
   const anyPresent = cat.conditions.some((c) => catState[c.key].present) || (catState.other && catState.other.trim());
   const expandKey = `${file.path}:${member.id}:${cat.key}`;
   const open = anyPresent || expandedHealthCategories.has(expandKey);
+  const healthRemoved = (key) => !!scope && isFieldRemoved(`member:${scope}.${key}`);
+  const rows = cat.conditions
+    .map((c) => {
+      const presentField = `health.conditions.${cat.key}.${c.key}.present`;
+      const expenseField = `health.conditions.${cat.key}.${c.key}.expense5k`;
+      const presentRemoved = healthRemoved(presentField);
+      const expenseRemoved = healthRemoved(expenseField);
+      if (presentRemoved && expenseRemoved) return "";
+      const presentId = appFieldId(member.id, presentField);
+      const expenseId = appFieldId(member.id, expenseField);
+      const present = catState[c.key].present;
+      return `
+              <div class="bm-appform-condition-row">
+                <span class="bm-appform-condition-label">${c.label}</span>
+                ${presentRemoved ? "" : `<label class="bm-checkbox-label"><input type="checkbox" id="${presentId}" data-field="${presentField}" data-member="${member.id}" data-kind="discrete" data-toggles-expense="${expenseId}" ${present ? "checked" : ""} /> Has this</label>`}
+                ${expenseRemoved ? "" : `<label class="bm-checkbox-label"><input type="checkbox" id="${expenseId}" data-field="${expenseField}" data-member="${member.id}" data-kind="discrete" ${catState[c.key].expense5k ? "checked" : ""} ${present ? "" : "disabled"} /> $5,000+/yr</label>`}
+              </div>`;
+    })
+    .join("");
+  const otherField = `health.conditions.${cat.key}.other`;
+  const otherHtml = healthRemoved(otherField)
+    ? ""
+    : `<div class="bm-field">
+          <label class="bm-field-label" for="${appFieldId(member.id, otherField)}">Other</label>
+          <input class="bm-input" id="${appFieldId(member.id, otherField)}" type="text" data-field="${otherField}" data-member="${member.id}" data-kind="text" value="${escapeHtml(catState.other)}" />
+        </div>`;
   return `
     <details class="bm-appform-category" data-expand-key="${expandKey}" ${open ? "open" : ""}>
       <summary>${cat.label}${anyPresent ? " •" : ""}</summary>
       <div class="bm-appform-conditions">
-        ${cat.conditions
-          .map((c) => {
-            const presentField = `health.conditions.${cat.key}.${c.key}.present`;
-            const expenseField = `health.conditions.${cat.key}.${c.key}.expense5k`;
-            const presentId = appFieldId(member.id, presentField);
-            const expenseId = appFieldId(member.id, expenseField);
-            const present = catState[c.key].present;
-            return `
-              <div class="bm-appform-condition-row">
-                <span class="bm-appform-condition-label">${c.label}</span>
-                <label class="bm-checkbox-label"><input type="checkbox" id="${presentId}" data-field="${presentField}" data-member="${member.id}" data-kind="discrete" data-toggles-expense="${expenseId}" ${present ? "checked" : ""} /> Has this</label>
-                <label class="bm-checkbox-label"><input type="checkbox" id="${expenseId}" data-field="${expenseField}" data-member="${member.id}" data-kind="discrete" ${catState[c.key].expense5k ? "checked" : ""} ${present ? "" : "disabled"} /> $5,000+/yr</label>
-              </div>`;
-          })
-          .join("")}
-        <div class="bm-field">
-          <label class="bm-field-label" for="${appFieldId(member.id, `health.conditions.${cat.key}.other`)}">Other</label>
-          <input class="bm-input" id="${appFieldId(member.id, `health.conditions.${cat.key}.other`)}" type="text" data-field="health.conditions.${cat.key}.other" data-member="${member.id}" data-kind="text" value="${escapeHtml(catState.other)}" />
-        </div>
+        ${rows}
+        ${otherHtml}
       </div>
     </details>`;
 }
@@ -809,32 +978,46 @@ function renderConditionCategoryHtml(cat, member, file) {
 function renderHealthQuestionnaireHtml(member, file) {
   const form = file.appForm;
   const health = member.health;
+  const scope = memberFieldScope(member);
+  const healthRemoved = (key) => !!scope && isFieldRemoved(`member:${scope}.${key}`);
   return `
     <div class="bm-appform-health">
       <div class="bm-section-label">Health history</div>
       <div class="bm-appform-grid">
-        ${appTextField(form, member.id, "health.height", "Height")}
-        ${appTextField(form, member.id, "health.weight", "Weight")}
-        ${appSelectField(form, member.id, "health.tobaccoUse", "Vaping or tobacco use?", YES_NO_OPTIONS)}
+        ${healthRemoved("health.height") ? "" : appTextField(form, member.id, "health.height", "Height")}
+        ${healthRemoved("health.weight") ? "" : appTextField(form, member.id, "health.weight", "Weight")}
+        ${healthRemoved("health.tobaccoUse") ? "" : appSelectField(form, member.id, "health.tobaccoUse", "Vaping or tobacco use?", YES_NO_OPTIONS)}
       </div>
-      <div class="bm-appform-checkbox-row">
-        ${appCheckboxField(form, member.id, "health.noPastMedicalHistory", "No past medical history", { kind: "structural" })}
-      </div>
+      ${
+        healthRemoved("health.noPastMedicalHistory")
+          ? ""
+          : `<div class="bm-appform-checkbox-row">
+              ${appCheckboxField(form, member.id, "health.noPastMedicalHistory", "No past medical history", { kind: "structural" })}
+            </div>`
+      }
       ${
         health.noPastMedicalHistory
           ? ""
           : `<div class="bm-appform-categories">
-              ${CONDITION_CATEGORIES.map((cat) => renderConditionCategoryHtml(cat, member, file)).join("")}
+              ${CONDITION_CATEGORIES.map((cat) => renderConditionCategoryHtml(cat, member, file, scope)).join("")}
             </div>`
       }
-      <div class="bm-appform-checkbox-row">
-        ${appCheckboxField(form, member.id, "health.noPastSurgicalHistory", "No past surgical history", { kind: "structural" })}
-      </div>
-      ${health.noPastSurgicalHistory ? "" : appTextareaField(form, member.id, "health.pastSurgicalHistoryText", "Past surgeries")}
-      <div class="bm-appform-checkbox-row">
-        ${appCheckboxField(form, member.id, "health.noMedications", "No current medications", { kind: "structural" })}
-      </div>
-      ${health.noMedications ? "" : appTextareaField(form, member.id, "health.currentMedicationsText", "Current medications (dose & frequency)")}
+      ${
+        healthRemoved("health.noPastSurgicalHistory")
+          ? ""
+          : `<div class="bm-appform-checkbox-row">
+              ${appCheckboxField(form, member.id, "health.noPastSurgicalHistory", "No past surgical history", { kind: "structural" })}
+            </div>`
+      }
+      ${health.noPastSurgicalHistory || healthRemoved("health.pastSurgicalHistoryText") ? "" : appTextareaField(form, member.id, "health.pastSurgicalHistoryText", "Past surgeries")}
+      ${
+        healthRemoved("health.noMedications")
+          ? ""
+          : `<div class="bm-appform-checkbox-row">
+              ${appCheckboxField(form, member.id, "health.noMedications", "No current medications", { kind: "structural" })}
+            </div>`
+      }
+      ${health.noMedications || healthRemoved("health.currentMedicationsText") ? "" : appTextareaField(form, member.id, "health.currentMedicationsText", "Current medications (dose & frequency)")}
     </div>`;
 }
 

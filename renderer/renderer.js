@@ -1719,6 +1719,11 @@ function render() {
   // to the top of a long scroll.
   const prevMappingContainer = document.getElementById("api-mapping-container");
   const mappingScrollTop = prevMappingContainer ? prevMappingContainer.scrollTop : 0;
+  // Same reasoning, for Manage Form Fields -- required/delete/reorder all
+  // re-render the whole modal, which would otherwise snap a long field list
+  // back to the top on every single click.
+  const prevManageFieldsBody = document.getElementById("manage-fields-body");
+  const manageFieldsScrollTop = prevManageFieldsBody ? prevManageFieldsBody.scrollTop : 0;
 
   if (!state.loadingInitial) maybeAdvanceReview(); // may flip state.reviewMode/reviewCursor off before anything below reads them
 
@@ -1778,7 +1783,11 @@ function render() {
     positionMappingConnectors();
   }
   if (state.apiImportModalOpen) app.appendChild(renderApiImportModal());
-  if (state.manageFieldsModalOpen) app.appendChild(renderManageFieldsModal());
+  if (state.manageFieldsModalOpen) {
+    app.appendChild(renderManageFieldsModal());
+    const newManageFieldsBody = document.getElementById("manage-fields-body");
+    if (newManageFieldsBody) newManageFieldsBody.scrollTop = manageFieldsScrollTop;
+  }
 }
 
 // Full-window loading state shown only during the startup sequence in init()
@@ -4020,20 +4029,12 @@ function renderApiMappingModal() {
   const appRows = buildAppFieldRows(state.apiMappingSlotCount, state.apiMappingCustomFields, state.apiMappingOrder, state.apiMappingRemovedFields);
   const moveArmedRow = state.apiMappingMoveArmed ? appRows.find((r) => r.id === state.apiMappingMoveArmed) : null;
   // Where a brand-new field can be categorized -- Primary/Spouse/Household/
-  // Church plus every member category currently in play, including
-  // whichever household-member slots have been added so far (see
-  // addMappingHouseholdMemberSlot), in the same order as the Application
-  // tab's own categories.
-  const newFieldScopes = [
-    { value: "primary", label: "Primary member" },
-    { value: "spouse", label: "Spouse" },
-    { value: "household", label: "Household" },
-    { value: "church", label: "Church" },
-    ...Array.from({ length: Math.max(0, state.apiMappingSlotCount - 1) }, (_, i) => ({
-      value: `slot${i + 2}`,
-      label: `Household Member ${i + 2}`,
-    })),
-  ];
+  // Church plus each one's health section, plus every member slot currently
+  // in play (see addMappingHouseholdMemberSlot) and ITS health section, in
+  // the same order as the Application tab's own categories -- see
+  // newFieldScopeOptions in application-form.js, shared with Manage Form
+  // Fields' own add-field scope <select> below.
+  const newFieldScopes = newFieldScopeOptions(state.apiMappingSlotCount);
   const overlay = el(`
     <div class="bm-modal-overlay" id="api-mapping-overlay">
       <div class="bm-modal bm-api-mapping-modal">
@@ -4086,7 +4087,7 @@ function renderApiMappingModal() {
                           (r) => `
                         <div class="bm-app-field-row${state.apiMappingMoveArmed === r.id ? " move-armed" : ""}" data-app-field-id="${r.id}">
                           <span class="bm-api-drag-handle" data-drag-handle="${r.id}" title="Click to arm for a long-distance move, or drag to reorder directly">${ICONS.grip || "⠿"}</span>
-                          <span class="bm-api-field-label">${escapeHtml(r.label)}</span>
+                          <span class="bm-api-field-label" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</span>
                           ${isFieldRequired(r.id) ? "" : `<button class="bm-api-field-disconnect" data-delete-mapping-field="${r.id}" title="Delete this field">${ICONS.x}</button>`}
                         </div>`
                         )
@@ -4226,6 +4227,43 @@ function deleteManageField(target, label) {
   render();
 }
 
+// A quick bulk version of deleteManageField, scoped to exactly one kind of
+// field (a condition's "$5,000+/yr" checkbox) across every member currently
+// in play -- CONDITION_CATEGORIES' 41 conditions x however many members
+// (primary/spouse/each slot) adds up fast, and clicking Delete on each one
+// individually is the exact tedium this exists to skip. Same underlying
+// mechanism as a single delete (the target just joins removedFields, real
+// for good once Save is clicked) -- a required field is left alone rather
+// than forced, matching deleteManageField's own rule, and any online-form
+// mapping still pointed at one of these gets disconnected the same generic
+// way saveManageFields already handles any removed target, not something
+// this function needs to know about itself.
+function removeAllHealthExpenseFields() {
+  const d = state.manageFieldsDraft;
+  const slotCount = manageFieldsSlotCount(d.customFields);
+  const scopes = ["primary", "spouse", ...Array.from({ length: Math.max(0, slotCount - 1) }, (_, i) => `slot${i + 2}`)];
+  const targets = [];
+  scopes.forEach((scope) => {
+    CONDITION_CATEGORIES.forEach((cat) => {
+      cat.conditions.forEach((c) => targets.push(`member:${scope}.health.conditions.${cat.key}.${c.key}.expense5k`));
+    });
+  });
+  const removable = targets.filter((t) => !d.requiredFields.includes(t) && !d.removedFields.includes(t));
+  if (removable.length === 0) {
+    alert('No "$5,000+/yr" fields left to remove.');
+    return;
+  }
+  if (
+    !confirm(
+      `Remove all ${removable.length} "$5,000+/yr" condition fields across every member? This can't be undone -- any online form field still mapped to one of them will be disconnected once you click Save.`
+    )
+  ) {
+    return;
+  }
+  d.removedFields.push(...removable);
+  render();
+}
+
 // Moves a row up/down among its own scope's siblings only (Primary's fields
 // reorder independently of Spouse's, etc. -- there's no cross-scope
 // reordering UI here, unlike the mapping modal's one flat list) by editing
@@ -4295,16 +4333,7 @@ async function saveManageFields() {
 function renderManageFieldsModal() {
   const d = state.manageFieldsDraft;
   const sections = buildManageFieldSections(manageFieldsSlotCount(d.customFields), d.customFields, d.appFieldOrder || [], d.removedFields);
-  const scopeOptions = [
-    { value: "primary", label: "Primary member" },
-    { value: "spouse", label: "Spouse" },
-    { value: "household", label: "Household" },
-    { value: "church", label: "Church" },
-    ...Array.from({ length: Math.max(0, manageFieldsSlotCount(d.customFields) - 1) }, (_, i) => ({
-      value: `slot${i + 2}`,
-      label: `Household Member ${i + 2}`,
-    })),
-  ];
+  const scopeOptions = newFieldScopeOptions(manageFieldsSlotCount(d.customFields));
   const renderRow = (row, scope, idx, total) => {
     const required = d.requiredFields.includes(row.id);
     return `
@@ -4317,7 +4346,7 @@ function renderManageFieldsModal() {
           <input type="checkbox" data-require-target="${row.id}" ${required ? "checked" : ""} />
           Required
         </label>
-        <span class="bm-manage-field-label">${escapeHtml(row.label)}</span>
+        <span class="bm-manage-field-label" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span>
         <button class="bm-btn bm-btn-ghost bm-btn-sm" data-delete-target="${row.id}" data-delete-label="${escapeHtml(row.label)}">${ICONS.x} Delete</button>
       </div>`;
   };
@@ -4326,9 +4355,12 @@ function renderManageFieldsModal() {
       <div class="bm-modal bm-manage-fields-modal">
         <div class="bm-modal-header">
           <div class="bm-modal-title">Manage Form Fields</div>
-          <div class="bm-modal-sub">Add, delete, require, or reorder fields on the Application tab -- works whether or not this folder is connected to the online form. Deleting a field is permanent.</div>
+          <div class="bm-modal-sub">
+            Add, delete, require, or reorder fields on the Application tab -- works whether or not this folder is connected to the online form. Deleting a field is permanent.
+            <button class="bm-inline-link" id="manage-fields-remove-expense-btn">Remove all "$5,000+/yr" fields</button>
+          </div>
         </div>
-        <div class="bm-modal-body bm-manage-fields-body">
+        <div class="bm-modal-body bm-manage-fields-body" id="manage-fields-body">
           ${sections
             .map(
               (s) => `
@@ -4362,6 +4394,7 @@ function renderManageFieldsModal() {
   });
   overlay.querySelector("#manage-fields-cancel").addEventListener("click", closeManageFieldsModal);
   overlay.querySelector("#manage-fields-save").addEventListener("click", saveManageFields);
+  overlay.querySelector("#manage-fields-remove-expense-btn").addEventListener("click", removeAllHealthExpenseFields);
   overlay.querySelectorAll("[data-require-target]").forEach((input) => {
     input.addEventListener("change", () => toggleManageFieldRequired(input.dataset.requireTarget));
   });
