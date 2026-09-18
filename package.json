@@ -1,6 +1,6 @@
 {
   "name": "applicationmanager-file-manager",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "ApplicationManager - a desktop file manager with preview, tagging, and notes",
   "main": "main.js",
   "author": "",
