@@ -696,6 +696,21 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-appform-condition-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
 .bm-appform-condition-label { font-size: 13px; color: var(--text-body); flex: 1; min-width: 160px; }
 
+/* A List custom field (see appListField) -- one compact input per cell.
+   Scrolls sideways on its own rather than widening the preview pane when a
+   list has more columns than fit. */
+.bm-appform-custom-checkbox { padding: 2px 0; }
+.bm-appform-list-wrap { overflow-x: auto; }
+.bm-appform-list { width: 100%; border-collapse: collapse; font-size: 12px; }
+.bm-appform-list th {
+  text-align: left; font-weight: 500; color: var(--text-caption); padding: 0 4px 4px; white-space: nowrap;
+  border-bottom: 1px solid var(--border-hairline);
+}
+.bm-appform-list td { padding: 3px 2px; }
+.bm-appform-list td .bm-input { min-width: 72px; padding: 5px 7px; font-size: 12px; }
+.bm-appform-list-actions { width: 1%; }
+.bm-appform-list-empty { color: var(--text-caption); padding: 6px 4px; }
+
 /* The Application tab's own top-level categories (Primary member, Spouse,
    Household, Church, and each member's health, see renderAppCategoryHtml)
    -- a bigger, more prominent <details> box than the nested condition
@@ -872,7 +887,7 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-api-import-modal { width: 640px; }
 .bm-api-connector-container {
   position: relative; display: flex; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  gap: 192px; border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: 0 var(--space-4);
+  gap: 200px; border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: 0 var(--space-4);
 }
 .bm-api-connector-col { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: var(--space-3) 0; }
 .bm-api-connector-svg { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 1; }
@@ -944,6 +959,9 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-manage-field-add-row { display: flex; gap: var(--space-2); align-items: center; }
 .bm-manage-field-add-row .bm-input { flex: 1; }
 .bm-manage-field-add-row .bm-select { width: 180px; flex-shrink: 0; }
+.bm-manage-field-type { width: 104px; flex-shrink: 0; padding-top: 4px; padding-bottom: 4px; font-size: 12px; }
+.bm-manage-field-type-fixed { color: var(--text-caption); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bm-api-mapping-notice { margin-bottom: var(--space-3); }
 
 /* ---- Color picker popover ----
    Deliberately NOT themed — kept on a fixed light surface in every theme so

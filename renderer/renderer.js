@@ -28,21 +28,23 @@ const ICONS = {
   chevronRight: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>`,
 };
 
-// The "Stack" app mark (design_handoff_billmanager_refresh — application icon spec):
-// a rounded green square with two layered document sheets. `reversed` swaps it for
-// the white-plate variant used on the About window's green band.
+// The app mark -- the same drawing as build/icon.png (the installed app's
+// own icon): a rounded Brotherhood Maroon square holding a white
+// application sheet with a person silhouette and a gray signature line.
+// Coordinates are icon.png's own 512px geometry scaled to this 32px
+// viewBox, so the two stay a match. `reversed` swaps it for the
+// white-plate variant used on the About window's colored band.
 function appMark(size, reversed) {
-  const square = reversed ? "#FFFFFF" : "#006D46";
-  const back = "#BBCFC4";
-  const front = reversed ? "#006D46" : "#FFFFFF";
-  const mark = reversed ? "#FFFFFF" : "#006D46";
+  const square = reversed ? "#FFFFFF" : "#864855";
+  const sheet = reversed ? "#864855" : "#FFFFFF";
+  const figure = reversed ? "#FFFFFF" : "#864855";
+  const line = reversed ? "#C7AAB0" : "#D5D6D7";
   return `<svg width="${size}" height="${size}" viewBox="0 0 32 32" aria-hidden="true">
-    <rect width="32" height="32" rx="7" fill="${square}"/>
-    <rect x="6" y="9" width="14" height="17" fill="${back}"/>
-    <rect x="9" y="6" width="14" height="17" fill="${front}"/>
-    <rect x="11.5" y="10" width="9" height="2" fill="${mark}"/>
-    <rect x="11.5" y="14" width="9" height="1" fill="${back}"/>
-    <rect x="11.5" y="17.5" width="6" height="1" fill="${back}"/>
+    <rect width="32" height="32" rx="6" fill="${square}"/>
+    <rect x="8.5" y="6" width="15" height="20" fill="${sheet}"/>
+    <circle cx="16" cy="12.75" r="3" fill="${figure}"/>
+    <path d="M10.75 21.25a5.25 5.25 0 0 1 10.5 0z" fill="${figure}"/>
+    <rect x="10.75" y="23.25" width="10.5" height="0.75" fill="${line}"/>
   </svg>`;
 }
 
@@ -165,6 +167,7 @@ const state = {
   apiMappingArmed: null, // gfFieldId currently "armed" (clicked, awaiting its App-side match), or null
   apiMappingMoveArmed: null, // App-side row id "armed" to be repositioned (its drag handle was clicked, not dragged) -- scroll anywhere, then click a row to drop it there. Mutually exclusive with apiMappingArmed.
   apiMappingCustomFields: [], // working copy of formSchema.customFields, grown by addMappingCustomField
+  apiMappingNotice: null, // one-line note about a change openApiMappingModal proposed on its own (e.g. the dependents list), or null
   apiMappingRemovedFields: [], // working copy of formSchema.removedFields, grown by deleteMappingField — deleting a non-required field's ✕ here is the same permanent delete Manage Form Fields does
   apiMappingOrder: [], // working copy of formSchema.appFieldOrder — App-side row display order, shared with Manage Form Fields and the real Application tab (see buildAppFieldRows)
   apiMappingSlotCount: 1, // highest household-member "slot" currently offered (1 = none beyond primary/spouse) — see addMappingHouseholdMemberSlot
@@ -221,7 +224,19 @@ function pushUndo(label, undo) {
   // human-readable label, which is exactly what a recent-activity feed needs.
   undoStack.push({ id: ++undoIdCounter, label, undo, time: Date.now() });
   if (undoStack.length > MAX_UNDO) undoStack.shift();
-  render();
+  // Deferred rather than called inline: several callers (e.g. a text field's
+  // blur handler, fired when Tab moves focus off it) invoke pushUndo() in the
+  // middle of the browser's own default action for that key -- it blurs the
+  // old field, runs this handler, then focuses whatever field is next in tab
+  // order. Rendering synchronously here tears down and rebuilds the DOM
+  // *before* that focus-the-next-field step runs, so the browser ends up
+  // trying to focus a node that no longer exists and focus falls back to
+  // <body> -- the next Tab press then starts over from the top of the page.
+  // Pushing render() to the next tick lets that focus move land first; by the
+  // time render() runs, document.activeElement is the real next field, and
+  // render()'s own captureFocus/restoreFocus carries it over to its
+  // freshly-rebuilt replacement.
+  setTimeout(render, 0);
 }
 
 // Undoes the most recent action — the toolbar Undo button and Ctrl+Z.
@@ -1692,12 +1707,63 @@ function updateReviewInPlace() {
 
   const body = document.querySelector(".bm-body");
   const oldPreview = body ? body.querySelector(":scope > .bm-preview") : null;
+  // The application form/tags/comments pane scrolls independently of the
+  // rest of the window (see .bm-preview-scroll in renderPreviewSingle) --
+  // with a long form, tabbing or editing a field re-renders this pane on
+  // every keystroke's worth of side effects, so without carrying this over
+  // the reviewer would get snapped back to the top of the form constantly.
+  const oldPreviewScroll = oldPreview ? oldPreview.querySelector(".bm-preview-scroll") : null;
+  const previewScrollTop = oldPreviewScroll ? oldPreviewScroll.scrollTop : 0;
   const newPreview = renderPreview();
   if (body) {
     if (oldPreview) body.replaceChild(newPreview, oldPreview);
     else body.appendChild(newPreview);
   }
+  const newPreviewScroll = newPreview.querySelector(".bm-preview-scroll");
+  if (newPreviewScroll) newPreviewScroll.scrollTop = previewScrollTop;
   return true;
+}
+
+// Captures which element (if any) inside #app has focus, so a render() that's
+// about to tear down and rebuild that element's subtree can hand focus back to
+// its replacement afterward — see restoreFocus. Without this, a field's own
+// change/input handler re-rendering synchronously (e.g. picking a tag,
+// changing the Location select) detaches the focused element mid-edit, and a
+// detached element's focus falls back to <body>; the very next Tab then starts
+// over from the top of the page instead of continuing to the next field.
+function captureFocus() {
+  const focused = document.activeElement;
+  if (!focused || focused === document.body || !app.contains(focused)) return null;
+  return {
+    id: focused.id || null,
+    dataIdx: focused.dataset && focused.dataset.idx !== undefined ? focused.dataset.idx : null,
+    firstClass: focused.classList && focused.classList[0] ? focused.classList[0] : null,
+    selectionStart: "selectionStart" in focused ? focused.selectionStart : null,
+    selectionEnd: "selectionEnd" in focused ? focused.selectionEnd : null,
+  };
+}
+
+// Hands focus back to whatever replaced the element captureFocus() saw —
+// matched by id where the rebuilt element has a stable one (selects, inputs),
+// or by its first class plus data-idx for the repeated per-row elements
+// (comment textareas) that don't.
+function restoreFocus(info) {
+  if (!info) return;
+  let target = null;
+  if (info.id) target = document.getElementById(info.id);
+  if (!target && info.firstClass && info.dataIdx != null) {
+    target = app.querySelector(`.${info.firstClass}[data-idx="${info.dataIdx}"]`);
+  }
+  if (!target || target === document.activeElement) return;
+  target.focus();
+  if (info.selectionStart != null && "setSelectionRange" in target) {
+    try {
+      target.setSelectionRange(info.selectionStart, info.selectionEnd);
+    } catch {
+      // Not a text-selectable input at the replacement (e.g. focus landed on a
+      // <select> instead) — nothing to restore.
+    }
+  }
 }
 
 function render() {
@@ -1724,13 +1790,23 @@ function render() {
   // back to the top on every single click.
   const prevManageFieldsBody = document.getElementById("manage-fields-body");
   const manageFieldsScrollTop = prevManageFieldsBody ? prevManageFieldsBody.scrollTop : 0;
+  // Same reasoning, for the preview pane's own scroll region (the
+  // application form/tags/comments -- see .bm-preview-scroll in
+  // renderPreviewSingle). A long application form otherwise loses its scroll
+  // position on every keystroke-adjacent re-render (see pushUndo).
+  const prevPreviewScroll = document.querySelector(".bm-preview-scroll");
+  const previewScrollTop = prevPreviewScroll ? prevPreviewScroll.scrollTop : 0;
+  const focusInfo = captureFocus();
 
   if (!state.loadingInitial) maybeAdvanceReview(); // may flip state.reviewMode/reviewCursor off before anything below reads them
 
   // See updateReviewInPlace() above — try it first so review mode's plate
   // survives an unrelated re-render. Only a genuine full rebuild (entering/
   // exiting review, stepping to another file, a modal opening) falls through.
-  if (state.reviewMode && updateReviewInPlace()) return;
+  if (state.reviewMode && updateReviewInPlace()) {
+    restoreFocus(focusInfo);
+    return;
+  }
   liveReviewPlate = null;
 
   app.innerHTML = "";
@@ -1763,6 +1839,8 @@ function render() {
   if (newGridWrap) newGridWrap.scrollTop = gridScrollTop;
   const newRailScroll = document.querySelector(".bm-rail-scroll");
   if (newRailScroll) newRailScroll.scrollTop = railScrollTop;
+  const newPreviewScroll = document.querySelector(".bm-preview-scroll");
+  if (newPreviewScroll) newPreviewScroll.scrollTop = previewScrollTop;
   if (state.tagModalOpen) {
     const overlay = renderTagManager();
     app.appendChild(overlay);
@@ -1788,6 +1866,7 @@ function render() {
     const newManageFieldsBody = document.getElementById("manage-fields-body");
     if (newManageFieldsBody) newManageFieldsBody.scrollTop = manageFieldsScrollTop;
   }
+  restoreFocus(focusInfo);
 }
 
 // Full-window loading state shown only during the startup sequence in init()
@@ -3734,8 +3813,37 @@ async function openApiMappingModal() {
       const slotMatch = /^member(?:custom)?:slot(\d+)\./.exec(m.target);
       if (slotMatch) maxSlot = Math.max(maxSlot, Number(slotMatch[1]));
     });
+    // A List field that's evidently the household's dependents (first- and
+    // last-name columns) belongs on the Children / Dependents target, which
+    // turns each row into a household member -- so if it's still sitting
+    // unmapped or on a plain custom field (the only option before that
+    // target existed), connect it there now. Only proposed, like any other
+    // change in this modal: nothing's written until Save.
+    state.apiMappingNotice = null;
+    if (!state.apiMappingRemovedFields.includes(DEPENDENTS_TARGET)) {
+      state.apiMappingFields.forEach((f) => {
+        const current = connections[f.gfFieldId];
+        const isCustom = current && (current.startsWith("custom:") || current.startsWith("membercustom:"));
+        if (!looksLikeDependentsList(f) || (current && !isCustom)) return;
+        connections[f.gfFieldId] = DEPENDENTS_TARGET;
+        state.apiMappingNotice = `"${f.label}" is now connected to Children / Dependents, so each person in it becomes a household member. Click Save mapping to keep this${
+          Object.keys(state.apiConfig.importedEntries || {}).length ? " -- already-imported applications will be updated too" : ""
+        }.`;
+      });
+    }
     state.apiMappingConnections = connections;
     state.apiMappingSlotCount = maxSlot;
+
+    // Refresh the saved mapping's copy of each online field's type/choices
+    // (see enrichFieldMapping) -- what the Application tab uses to show
+    // fields the way the online form asks them. Saved right away rather
+    // than waiting for Save mapping: it's a correction to what the online
+    // fields already are (e.g. a mapping saved before this existed, or a
+    // dropdown whose choices were since edited online), not a mapping change.
+    const enriched = enrichFieldMapping(state.apiConfig.fieldMapping, state.apiMappingFields);
+    if (enriched.changed) {
+      state.apiConfig = await window.api.saveApiConfig(state.folder, { ...state.apiConfig, fieldMapping: enriched.fieldMapping });
+    }
   } catch (e) {
     state.apiMappingError = e.message || String(e);
   } finally {
@@ -3752,6 +3860,7 @@ function closeApiMappingModal() {
   state.apiMappingCustomFields = [];
   state.apiMappingRemovedFields = [];
   state.apiMappingOrder = [];
+  state.apiMappingNotice = null;
   render();
 }
 
@@ -3794,6 +3903,9 @@ function addMappingCustomField(scope) {
   if (!field) return;
   const usedKeys = new Set(state.apiMappingCustomFields.map((c) => c.key));
   const key = slugifyFieldKey(field.label, usedKeys);
+  // No type of its own needed: while it's connected, it's shown the way the
+  // online field asks it (dropdown with its choices, date, checkbox, ...) --
+  // see customFieldPresentation.
   const customField = { key, label: field.label, scope };
   state.apiMappingCustomFields.push(customField);
   state.apiMappingConnections[state.apiMappingArmed] = customFieldTarget(customField);
@@ -3980,6 +4092,7 @@ async function saveApiMapping() {
     gfFieldId: f.gfFieldId,
     label: f.label,
     target: state.apiMappingConnections[f.gfFieldId] || "ignore",
+    ...gfFieldInfo(f), // the online field's type/choices -- see presentationFromGfInfo
   }));
   // Rebuilt from scratch, same rule as before this was a visual editor: a
   // custom field only survives the save if some row is still connected to
@@ -4063,7 +4176,8 @@ function renderApiMappingModal() {
               ? `<div class="bm-tag-hint">Loading form fields…</div>`
               : state.apiMappingError
                 ? `<div class="bm-appform-badge">${escapeHtml(state.apiMappingError)}</div>`
-                : `<div class="bm-api-connector-container" id="api-mapping-container">
+                : `${state.apiMappingNotice ? `<div class="bm-appform-badge bm-appform-badge--ok bm-api-mapping-notice">${escapeHtml(state.apiMappingNotice)}</div>` : ""}
+                  <div class="bm-api-connector-container" id="api-mapping-container">
                     <div class="bm-api-connector-col bm-api-connector-col-left">
                       ${state.apiMappingFields
                         .map((f) => {
@@ -4334,6 +4448,30 @@ function renderManageFieldsModal() {
   const d = state.manageFieldsDraft;
   const sections = buildManageFieldSections(manageFieldsSlotCount(d.customFields), d.customFields, d.appFieldOrder || [], d.removedFields);
   const scopeOptions = newFieldScopeOptions(manageFieldsSlotCount(d.customFields));
+  // A custom field's type (see effectiveCustomFieldType in
+  // application-form.js) -- Text or Checkbox for any custom field, plus
+  // List for one that's already a list (a List's columns come from the
+  // online form, so there's no way to define one from scratch here). A
+  // field connected to the online form takes the online field's type
+  // instead (see customFieldPresentation), so it just says which.
+  const GF_KIND_LABELS = { text: "Text", textarea: "Paragraph", select: "Dropdown", multiselect: "Multi-select", checkbox: "Checkbox", date: "Date", number: "Number", list: "List" };
+  const renderTypeSelect = (row) => {
+    const def = row.isCustom ? d.customFields.find((c) => c.key === row.customKey) : null;
+    if (!def) return "";
+    const gf = gfPresentationForTarget(state.apiConfig?.fieldMapping, customFieldTarget(def));
+    if (gf) {
+      return `<span class="bm-manage-field-type bm-manage-field-type-fixed" title="Set by the online form's field">${GF_KIND_LABELS[gf.kind] || "Text"} (online)</span>`;
+    }
+    const current = def.type || "text";
+    const options = [
+      { value: "text", label: "Text" },
+      { value: "checkbox", label: "Checkbox" },
+      ...(current === "list" ? [{ value: "list", label: "List" }] : []),
+    ];
+    return `<select class="bm-select bm-manage-field-type" data-type-key="${escapeHtml(def.key)}" title="Field type">
+      ${options.map((o) => `<option value="${o.value}" ${current === o.value ? "selected" : ""}>${o.label}</option>`).join("")}
+    </select>`;
+  };
   const renderRow = (row, scope, idx, total) => {
     const required = d.requiredFields.includes(row.id);
     return `
@@ -4347,6 +4485,7 @@ function renderManageFieldsModal() {
           Required
         </label>
         <span class="bm-manage-field-label" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span>
+        ${renderTypeSelect(row)}
         <button class="bm-btn bm-btn-ghost bm-btn-sm" data-delete-target="${row.id}" data-delete-label="${escapeHtml(row.label)}">${ICONS.x} Delete</button>
       </div>`;
   };
@@ -4404,6 +4543,14 @@ function renderManageFieldsModal() {
   overlay.querySelectorAll("[data-delete-target]").forEach((btn) => {
     btn.addEventListener("click", () => deleteManageField(btn.dataset.deleteTarget, btn.dataset.deleteLabel));
   });
+  overlay.querySelectorAll("[data-type-key]").forEach((select) => {
+    select.addEventListener("change", () => {
+      const def = d.customFields.find((c) => c.key === select.dataset.typeKey);
+      if (!def) return;
+      if (select.value === "text") delete def.type;
+      else def.type = select.value;
+    });
+  });
   overlay.querySelector("#manage-field-new-label").addEventListener("input", (e) => {
     state.manageFieldsNewLabel = e.target.value;
   });
@@ -4456,6 +4603,10 @@ async function runApiImport() {
           result.errors.map((e) => `#${e.id}: ${e.error}`).join("\n")
       );
     }
+    // The import refreshes the saved mapping's online field types/choices
+    // (see enrichFieldMapping in main.js's import-gf-entries), which drive
+    // how the Application tab shows each field -- pick it back up.
+    state.apiConfig = await window.api.getApiConfig(state.folder);
     closeApiImportModal();
     await refreshFiles();
   } catch (e) {

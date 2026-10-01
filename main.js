@@ -6,8 +6,18 @@ const { pathToFileURL } = require("url");
 const { execFileSync, spawn } = require("child_process");
 const { exiftool } = require("exiftool-vendored");
 const { autoUpdater } = require("electron-updater");
-const { PDFDocument, StandardFonts, degrees } = require("pdf-lib");
-const { makeBlankAppForm, makeBlankHouseholdMember, DEFAULT_REQUIRED_FIELDS } = require("./renderer/application-form.js");
+const { PDFDocument, degrees } = require("pdf-lib");
+const {
+  makeBlankAppForm,
+  makeBlankHouseholdMember,
+  DEFAULT_REQUIRED_FIELDS,
+  DEPENDENTS_TARGET,
+  mergeDependentRows,
+  enrichFieldMapping,
+  NO_HISTORY_FLAG_KEYS,
+  interpretNoFlagAnswer,
+} = require("./renderer/application-form.js");
+const { generateApplicationPdf, formatAnswerText } = require("./application-pdf.js");
 
 const ACCEPTED_EXT = [".pdf", ".jpg", ".jpeg", ".png"];
 
@@ -1362,19 +1372,69 @@ ipcMain.handle("test-gf-connection", async (event, siteUrl, consumerKey, consume
 // keyed "parentId.subInputId" (e.g. "1.3") -- confirmed from docs as the
 // convention entries use for these. Hidden sub-inputs (e.g. an unused Name
 // middle-name field) are skipped since they'll never carry real data.
+//
+// Each row also carries what the Application tab needs to show the field
+// the way the online form asks it (see presentationFromGfInfo in
+// application-form.js): its GF type (`gfType` -- "select", "radio", "date",
+// "consent", "list", ...), a dropdown/radio/multi-select field's `choices`
+// ({ value, label } -- an entry stores the choice's value, which is its
+// text unless the form has "show values" turned on), and a multi-column
+// List field's `columns` (an entry's list value is an array of row objects
+// keyed by exactly those names). A field whose `inputType` says what it
+// really renders as (a Poll/Quiz/Survey question as a "radio", a
+// Product as a "select", ...) is typed by that instead of its own type.
+function gfChoices(field) {
+  if (!Array.isArray(field.choices)) return null;
+  const choices = field.choices
+    .filter((c) => c && (c.text || c.value))
+    .map((c) => ({ value: c.value !== undefined && c.value !== null && c.value !== "" ? String(c.value) : String(c.text), label: String(c.text || c.value) }));
+  return choices.length ? choices : null;
+}
+
 function flattenGfFields(form) {
   const rows = [];
   for (const field of form.fields || []) {
+    const gfType = field.inputType || field.type || null;
     if (Array.isArray(field.inputs) && field.inputs.length > 0) {
       for (const input of field.inputs) {
         if (input.isHidden) continue;
         rows.push({
           gfFieldId: String(input.id),
-          label: input.label ? `${field.label} (${input.label})` : field.label || `Field ${input.id}`,
+          // A sub-input named the same as its field (a Consent field's
+          // "Consent" checkbox) is just the field -- no "Consent (Consent)".
+          label: input.label && input.label !== field.label ? `${field.label} (${input.label})` : field.label || `Field ${input.id}`,
+          gfType,
         });
       }
     } else {
-      rows.push({ gfFieldId: String(field.id), label: field.label || `Field ${field.id}` });
+      const row = { gfFieldId: String(field.id), label: field.label || `Field ${field.id}`, gfType };
+      if (gfType === "list") {
+        if (field.enableColumns && Array.isArray(field.choices)) row.columns = field.choices.map((c) => c.text || c.value).filter(Boolean);
+      } else if (gfType === "select" || gfType === "radio" || gfType === "multiselect") {
+        const choices = gfChoices(field);
+        if (choices) row.choices = choices;
+      }
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+// The sub-inputs flattenGfFields leaves out as hidden -- not offered for
+// mapping, but some still carry an answer (an Address field with its
+// Country input hidden still submits the default country), and the PDF
+// shows every submitted answer, so it needs their labels too.
+function hiddenGfInputs(form) {
+  const rows = [];
+  for (const field of form.fields || []) {
+    if (!Array.isArray(field.inputs)) continue;
+    for (const input of field.inputs) {
+      if (!input.isHidden) continue;
+      rows.push({
+        gfFieldId: String(input.id),
+        label: input.label && input.label !== field.label ? `${field.label} (${input.label})` : field.label || `Field ${input.id}`,
+        gfType: field.inputType || field.type || null,
+      });
     }
   }
   return rows;
@@ -1404,7 +1464,11 @@ ipcMain.handle("list-gf-entries", async (event, folder) => {
   const raw = await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}/entries`);
   const { entries, totalCount } = normalizeEntriesResponse(raw);
   const imported = config.importedEntries || {};
-  const notImported = entries.filter((e) => !imported[String(e.id)]);
+  // An entry whose imported file has since been deleted is offered again --
+  // that's how an application gets re-imported (e.g. to regenerate its PDF
+  // after the layout or field mapping changed).
+  const stillImported = (id) => imported[id] && fs.existsSync(path.join(folder, imported[id]));
+  const notImported = entries.filter((e) => !stillImported(String(e.id)));
   const firstNameMap = (config.fieldMapping || []).find((m) => m.target === "member:primary.firstName");
   const lastNameMap = (config.fieldMapping || []).find((m) => m.target === "member:primary.lastName");
   const summarized = notImported.map((e) => {
@@ -1506,51 +1570,34 @@ function resolveAppFormTarget(appForm, target, removedFields) {
 function applyGfEntryToAppForm(entry, fieldMapping, removedFields) {
   const appForm = makeBlankAppForm();
   appForm.householdMembers[0].importSlot = "primary";
+  const dependentRows = [];
   for (const map of fieldMapping || []) {
     const value = entry[map.gfFieldId];
     if (value === undefined || value === "") continue;
-    const resolved = resolveAppFormTarget(appForm, map.target, removedFields);
-    if (resolved) resolved.obj[resolved.key] = value;
-  }
-  return appForm;
-}
-
-// One-page-per-overflow plain-text PDF listing every answer the entry
-// actually carries (labeled via fieldMapping, which has one row per
-// discovered form field regardless of how -- or whether -- it was mapped),
-// so nothing submitted is silently missing from the visual record even if a
-// field wasn't mapped onto the schema. This app's only prior pdf-lib usage
-// (writeAutoexportCopy above) just embeds an existing image; this draws
-// text, still with no native build step.
-async function generateGfSummaryPdf(entry, fieldMapping) {
-  const PAGE_WIDTH = 612;
-  const PAGE_HEIGHT = 792;
-  const MARGIN = 54;
-  const WRAP_CHARS = 95;
-  const pdfDoc = await PDFDocument.create();
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  let page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-  let y = PAGE_HEIGHT - MARGIN;
-  const drawLine = (text, { bold = false, size = 11, gapAfter = 5 } = {}) => {
-    if (y < MARGIN) {
-      page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-      y = PAGE_HEIGHT - MARGIN;
+    // Collected now, merged once every other field is in place -- the
+    // dependents' own Health History Questionnaire slots (mapped later in
+    // the form) need to exist first so a list row can fill in that same
+    // person instead of adding a second copy (see mergeDependentRows).
+    if (map.target === DEPENDENTS_TARGET) {
+      if (Array.isArray(value) && !(removedFields || []).includes(DEPENDENTS_TARGET)) dependentRows.push(...value);
+      continue;
     }
-    page.drawText(text, { x: MARGIN, y, size, font: bold ? boldFont : font });
-    y -= size + gapAfter;
-  };
-  drawLine(`Online Member Application -- Entry #${entry.id}`, { bold: true, size: 14, gapAfter: 8 });
-  drawLine(`Submitted: ${entry.date_created || "unknown"}`, { size: 10, gapAfter: 14 });
-  for (const map of fieldMapping || []) {
-    const value = entry[map.gfFieldId];
-    if (value === undefined || value === "") continue;
-    drawLine(map.label || map.gfFieldId, { bold: true, gapAfter: 2 });
-    const text = String(value);
-    for (let i = 0; i < text.length; i += WRAP_CHARS) drawLine(text.slice(i, i + WRAP_CHARS));
-    y -= 6;
+    const resolved = resolveAppFormTarget(appForm, map.target, removedFields);
+    if (!resolved) continue;
+    // A "No ___ history" checkbox fed by a Yes/No question: "Past Medical
+    // History: No" means the box is checked -- see interpretNoFlagAnswer.
+    if (!resolved.isExtra && NO_HISTORY_FLAG_KEYS.includes(resolved.key) && /\.health\.[^.]+$/.test(map.target)) {
+      resolved.obj[resolved.key] = interpretNoFlagAnswer(value, map.label);
+      continue;
+    }
+    // A List answer (an array of row objects) stays an array in a custom
+    // field, which renders it as a table; a built-in field is always a
+    // single text value, so it gets the list flattened to readable text
+    // instead of "[object Object]".
+    resolved.obj[resolved.key] = Array.isArray(value) && !resolved.isExtra ? formatAnswerText(value) : value;
   }
-  return pdfDoc.save();
+  mergeDependentRows(appForm, dependentRows);
+  return appForm;
 }
 
 ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
@@ -1559,8 +1606,22 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
   const raw = await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}/entries`);
   const { entries } = normalizeEntriesResponse(raw);
   const byId = new Map(entries.map((e) => [String(e.id), e]));
-  const fieldMapping = config.fieldMapping || [];
-  const removedFields = readFormSchema(folder).removedFields;
+  const schema = readFormSchema(folder);
+  const removedFields = schema.removedFields;
+  // Refresh each mapped field's online type/choices/columns from the form's
+  // current field list (see enrichFieldMapping) -- the Application tab shows
+  // fields the way the online form asks them, and the PDF tells consents,
+  // checkboxes, dropdowns and lists apart, both from this. Best-effort: if
+  // the form can't be fetched, the import still goes ahead with whatever the
+  // saved mapping already carries.
+  let gfFields = [];
+  let hiddenInputs = [];
+  try {
+    const gfForm = await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}`);
+    gfFields = flattenGfFields(gfForm);
+    hiddenInputs = hiddenGfInputs(gfForm);
+  } catch {}
+  const fieldMapping = enrichFieldMapping(config.fieldMapping || [], gfFields).fieldMapping;
   const inboxDir = path.join(folder, "Inbox");
   fs.mkdirSync(inboxDir, { recursive: true });
   const imported = [];
@@ -1584,7 +1645,14 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
         fileName = `Online - ${safeName} - ${id} (${n++}).pdf`;
         destFull = path.join(inboxDir, fileName);
       }
-      const pdfBytes = await generateGfSummaryPdf(entry, fieldMapping);
+      const pdfBytes = await generateApplicationPdf({
+        appForm,
+        entry,
+        fieldMapping,
+        hiddenInputs,
+        customFields: schema.customFields,
+        removedFields,
+      });
       fs.writeFileSync(destFull, pdfBytes);
       await writeFileMeta(destFull, ".pdf", ["API"], []);
       writeAppForm(destFull, appForm);
@@ -1595,7 +1663,7 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
       errors.push({ id, error: e.message });
     }
   }
-  writeApiConfig(folder, { ...config, importedEntries });
+  writeApiConfig(folder, { ...config, fieldMapping, importedEntries });
   return { imported, errors };
 });
 
@@ -1629,6 +1697,18 @@ ipcMain.handle("remap-imported-entries", async (event, folder, oldFieldMapping, 
       if (!oldResolved) continue;
       const oldValue = oldResolved.obj[oldResolved.key];
       if (oldValue === undefined || oldValue === "") continue;
+      // Retargeted to Children / Dependents (typically a List field that was
+      // first mapped as a plain custom field): each list row becomes -- or
+      // fills in -- a household member, and the list itself goes away.
+      if (map.target === DEPENDENTS_TARGET) {
+        if (!Array.isArray(oldValue) || (removedFields || []).includes(DEPENDENTS_TARGET)) continue;
+        mergeDependentRows(appForm, oldValue);
+        if (oldResolved.isExtra) delete oldResolved.obj[oldResolved.key];
+        else oldResolved.obj[oldResolved.key] = "";
+        migrated.push({ path: relPath, field: map.label, from: old.target, to: map.target });
+        touched = true;
+        continue;
+      }
       const newResolved = resolveAppFormTarget(appForm, map.target, removedFields);
       if (!newResolved) continue; // e.g. retargeted to "ignore" -- nothing sensible to move to, leave the old value in place
       const newValue = newResolved.obj[newResolved.key];

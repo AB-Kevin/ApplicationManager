@@ -156,6 +156,26 @@ const MEDICARE_OPTIONS = [
   { value: "D", label: "Part D" },
 ];
 
+// Finds which of `options` (one of the *_OPTIONS/INCOME_TIERS tables above)
+// a raw value means -- tolerant of the online form's own spelling ("Male"
+// vs "male", "$25,001-50,000" vs "25001-50000", "Part A" vs "A"), since
+// those arrive verbatim from Gravity Forms rather than as this schema's own
+// option values. Compares with case and punctuation stripped, against both
+// each option's value and its label. Returns the option, or null.
+function matchChoiceOption(options, raw) {
+  if (raw === undefined || raw === null || raw === "") return null;
+  const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const n = norm(raw);
+  if (!n) return null;
+  const direct = options.find((o) => norm(o.value) === n || norm(o.label) === n);
+  if (direct) return direct;
+  // "None" in one spelling, a sentence in the other -- the app's own
+  // Medicare "none" vs the online form's "I'm not covered by Medicare".
+  const NONE_LIKE = /^none$|not covered|not applicable/i;
+  if (NONE_LIKE.test(String(raw).trim())) return options.find((o) => NONE_LIKE.test(String(o.label)) || NONE_LIKE.test(String(o.value))) || null;
+  return null;
+}
+
 function appUid() {
   return `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -374,6 +394,18 @@ const CHURCH_FIELD_KEYS = new Set([
   "churchContactZip",
 ]);
 
+// The one mapping target that isn't a single field: a Gravity Forms List
+// field whose rows are the household's children/dependents (one row per
+// person, columns First Name/Middle Name/Last Name/Date of Birth/Last 4 of
+// SSN/Gender -- the paper form's own "Children / Dependents" block). Each
+// row becomes (or fills in) a real household member via mergeDependentRows
+// below, rather than the whole list landing in one text field. Belongs to
+// no catalog scope (see rowBelongsToScope), so it only ever appears as a
+// mapping-modal row, never as an Application tab input of its own -- the
+// members it creates already have their own categories there.
+const DEPENDENTS_TARGET = "dependents";
+const DEPENDENTS_ROW_LABEL = "Children / Dependents → List (one household member per row)";
+
 // Same identity-field set as Primary/Spouse above, reused for every
 // household-member slot beyond those two.
 const MEMBER_SLOT_FIELDS = [
@@ -548,6 +580,9 @@ function buildNaturalAppFieldRows(slotCount, customFields) {
       rows.push(...healthFieldRows(g.scope));
       pushCustomsFor(`${g.scope}-health`);
     }
+    // Right after Spouse, matching the paper form's own order (Primary,
+    // Spouse, Children / Dependents, then Household).
+    if (g.scope === "spouse") rows.push({ id: DEPENDENTS_TARGET, label: DEPENDENTS_ROW_LABEL });
   });
   for (let slot = 2; slot <= slotCount; slot++) {
     // Labeled with the SAME group as this slot's health fields below (not
@@ -747,6 +782,276 @@ function slugifyFieldKey(label, used) {
   return key;
 }
 
+// ---- Field presentation (matching the online form) ----
+// A field connected to an online-form field is shown the way the online form
+// asks it -- a Gravity Forms dropdown or radio question becomes a dropdown
+// with the online form's own choices, a Date field a date picker, a
+// Paragraph field a text box, a Consent/checkbox a checkbox, a List a table
+// -- for built-in fields (Gender, Marital status, Medicare, ...) and custom
+// ones alike. The online field's type/choices/columns are carried on the
+// folder's fieldMapping rows themselves (see gfFieldInfo/enrichFieldMapping,
+// refreshed every time the online form's field list is fetched), so the
+// Application tab, Manage Form Fields and the generated PDF all read them
+// from the one place. A field NOT connected to the online form (a paper-only
+// folder, or anything mapped to "ignore") keeps its own built-in
+// presentation.
+//
+// A presentation is { kind, options?, columns?, inputType? } with kind one
+// of text, textarea, select, multiselect, checkbox, date, month, number,
+// list.
+
+// The online-form facts worth keeping from a flattenGfFields row -- its GF
+// type, and its choices (dropdown/radio/multi-select) or columns (List).
+function gfFieldInfo(gfField) {
+  const info = {};
+  if (!gfField) return info;
+  if (gfField.gfType) info.gfType = gfField.gfType;
+  if (Array.isArray(gfField.choices) && gfField.choices.length) info.choices = gfField.choices;
+  if (Array.isArray(gfField.columns) && gfField.columns.length) info.columns = gfField.columns;
+  return info;
+}
+
+// Copies each online field's current type/choices/columns (from a fresh
+// flattenGfFields fetch) onto the matching fieldMapping rows, so a mapping
+// saved before this existed -- or a choice list since edited on the online
+// form -- stays current without anyone re-mapping by hand. Rows for fields
+// the fetch didn't return are left as they were. Returns the new array and
+// whether anything changed.
+function enrichFieldMapping(fieldMapping, gfFields) {
+  const gfById = new Map((gfFields || []).map((f) => [f.gfFieldId, f]));
+  let changed = false;
+  const result = (fieldMapping || []).map((m) => {
+    const gf = gfById.get(m.gfFieldId);
+    if (!gf) return m;
+    const { gfType, choices, columns, ...rest } = m;
+    const next = { ...rest, ...gfFieldInfo(gf) };
+    if (JSON.stringify(next) !== JSON.stringify(m)) changed = true;
+    return next;
+  });
+  return { fieldMapping: result, changed };
+}
+
+// Gravity Forms field type -> presentation. null for a type with no
+// sensible input of its own (html, section, page, ...) or one this app
+// doesn't recognize, so the field keeps its built-in presentation.
+function presentationFromGfInfo(info) {
+  if (!info || !info.gfType) return null;
+  const options = (info.choices || []).map((c) => ({ value: c.value, label: c.label }));
+  switch (info.gfType) {
+    case "select":
+    case "radio":
+      return options.length ? { kind: "select", options } : null;
+    case "multiselect":
+      return options.length ? { kind: "multiselect", options } : null;
+    case "checkbox":
+    case "consent":
+      return { kind: "checkbox" };
+    case "textarea":
+    case "post_content":
+      return { kind: "textarea" };
+    case "date":
+      return { kind: "date" };
+    case "number":
+      return { kind: "number" };
+    case "list":
+      return { kind: "list", columns: info.columns || [] };
+    case "email":
+      return { kind: "text", inputType: "email" };
+    case "phone":
+      return { kind: "text", inputType: "tel" };
+    case "website":
+      return { kind: "text", inputType: "url" };
+    case "text":
+    case "name":
+    case "address":
+    case "hidden":
+    case "time":
+      return { kind: "text" };
+    default:
+      return null;
+  }
+}
+
+// target -> presentation for one fieldMapping array, built once per array
+// (the Application tab asks for dozens of targets per render, against a
+// mapping that can run past a thousand rows). The first online field
+// connected to a target with a recognizable type wins.
+const gfPresentationCache = new WeakMap();
+function gfPresentationForTarget(fieldMapping, target) {
+  if (!target || !Array.isArray(fieldMapping)) return null;
+  let byTarget = gfPresentationCache.get(fieldMapping);
+  if (!byTarget) {
+    byTarget = new Map();
+    fieldMapping.forEach((m) => {
+      if (!m.target || m.target === "ignore" || byTarget.has(m.target)) return;
+      const p = presentationFromGfInfo(m);
+      if (p) byTarget.set(m.target, p);
+    });
+    gfPresentationCache.set(fieldMapping, byTarget);
+  }
+  return byTarget.get(target) || null;
+}
+
+// The live folder's mapping, for the renderer's own calls above (main.js
+// and the PDF pass theirs in explicitly).
+function currentFieldMapping() {
+  return (typeof state !== "undefined" && state.apiConfig && state.apiConfig.fieldMapping) || [];
+}
+
+// How a field is actually shown: the online form's presentation when it's
+// connected to one, else `builtin`. Two built-in kinds are kept regardless:
+// a checkbox (every built-in checkbox -- "Has this", "No past medical
+// history", ... -- drives what else is shown or hidden, which a dropdown of
+// the online form's wording couldn't), and a textarea connected to a
+// single-line online text field (a length difference, not a different kind
+// of question -- medications lists still need the room).
+function resolvePresentation(target, builtin, fieldMapping) {
+  const gf = gfPresentationForTarget(fieldMapping, target);
+  if (!gf) return builtin;
+  if (builtin.kind === "checkbox") return builtin;
+  if (builtin.kind === "textarea" && gf.kind === "text") return builtin;
+  return gf;
+}
+
+// A custom field's built-in presentation (when it isn't connected to the
+// online form): its type as set in Manage Form Fields, or a List for an
+// untyped field that's nonetheless holding an array (an import from before
+// types existed), so that never falls back to "[object Object]".
+function customFieldBuiltinPresentation(def, value) {
+  const type = effectiveCustomFieldType(def, value);
+  if (type === "list") return { kind: "list", columns: (def && def.columns) || [] };
+  if (type === "checkbox") return { kind: "checkbox" };
+  return { kind: "text" };
+}
+
+// A custom field's presentation -- the online form's, when connected, wins
+// outright (unlike resolvePresentation's built-in-checkbox rule, a custom
+// field's own type has no behavior tied to it).
+function customFieldPresentation(def, value, fieldMapping) {
+  return gfPresentationForTarget(fieldMapping, customFieldTarget(def)) || customFieldBuiltinPresentation(def, value);
+}
+
+// A custom field's type as far as rendering is concerned -- its declared
+// type, or "list" for an untyped field that's nonetheless holding an array
+// (an import from before types existed), so that never falls back to a
+// text box showing "[object Object]".
+function effectiveCustomFieldType(def, value) {
+  if (def && (def.type === "checkbox" || def.type === "list")) return def.type;
+  return Array.isArray(value) ? "list" : "text";
+}
+
+// A List field's columns: the definition's own, else whatever keys its rows
+// actually carry (first-seen order).
+function listFieldColumns(def, rows) {
+  if (def && Array.isArray(def.columns) && def.columns.length) return def.columns;
+  const cols = [];
+  (Array.isArray(rows) ? rows : []).forEach((r) => {
+    if (r && typeof r === "object") Object.keys(r).forEach((k) => cols.includes(k) || cols.push(k));
+  });
+  return cols;
+}
+
+// ---- Children / Dependents list -> household members ----
+
+// Which member field each dependents-list column fills, matched by the
+// column's own label. Order matters: "Last 4 Digits of SSN" has to hit the
+// SSN rule before the plain "last" (-> last name) one can claim it.
+const DEPENDENT_COLUMN_RULES = [
+  { key: "ssnLast4", re: /ssn|social/i },
+  { key: "dob", re: /birth|dob/i },
+  { key: "initial", re: /middle|initial/i },
+  { key: "firstName", re: /first/i },
+  { key: "lastName", re: /last/i },
+  { key: "gender", re: /gender|sex/i },
+];
+
+// True for a List field (a flattenGfFields row) that's evidently the
+// household's dependents -- it has both a first-name and a last-name
+// column -- so the mapping screen can connect it to DEPENDENTS_TARGET by
+// default.
+function looksLikeDependentsList(gfField) {
+  if (!gfField || gfField.gfType !== "list" || !Array.isArray(gfField.columns)) return false;
+  return gfField.columns.some((c) => /first/i.test(c)) && gfField.columns.some((c) => /last/i.test(c) && !/ssn|digit/i.test(c));
+}
+
+// The three "No ___" flags on each member's questionnaire (No past medical
+// history / surgical history / medications), which the online form may ask
+// either as a checkbox of that same name or as a Yes/No question named for
+// the history itself ("Past Medical History: No"). Those two read opposite
+// ways -- "No" to "Past Medical History" means there IS no history -- so an
+// answer is interpreted against how its question is worded: a Yes/No answer
+// to a question starting with "No" means what it says, anything else is
+// flipped; a checkbox's own text (or any other non-blank answer) means
+// checked.
+const NO_HISTORY_FLAG_KEYS = ["noPastMedicalHistory", "noPastSurgicalHistory", "noMedications"];
+function interpretNoFlagAnswer(value, questionLabel) {
+  if (value === true || value === false) return value;
+  const s = String(value ?? "").trim();
+  if (!s) return false;
+  const askedNegatively = /^\s*no\b/i.test(questionLabel || "");
+  if (/^(yes|true|1)$/i.test(s)) return askedNegatively;
+  if (/^(no|false|0)$/i.test(s)) return !askedNegatively;
+  return true;
+}
+
+// "03/04/2015" / "3/4/15" -> "2015-03-04", the only format a date <input>
+// (see renderMemberFieldsHtml's DOB field) will display. Anything already
+// ISO, or not recognizably a date, passes through unchanged.
+function normalizeDateToIso(raw) {
+  const s = String(raw || "").trim();
+  const m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/.exec(s);
+  if (!m) return s;
+  let year = Number(m[3]);
+  if (m[3].length === 2) year += year > (new Date().getFullYear() % 100) ? 1900 : 2000;
+  return `${year}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+}
+
+// Turns each row of a dependents List field into a household member.
+// The online form collects a dependent twice -- once in this list
+// (name/DOB/SSN/gender) and again, by name only, in their own Health History
+// Questionnaire slot (member:slotN.firstName/lastName) -- so a row whose
+// name matches a member already created from one of those slots fills in
+// that member's blank fields instead of adding a duplicate person. Never
+// overwrites a value that's already there. A row with no name, DOB, or SSN
+// is skipped: the online list always submits at least one row, with its
+// Gender dropdown's default already chosen, even when nothing was entered.
+function mergeDependentRows(appForm, rows) {
+  if (!Array.isArray(rows)) return 0;
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  let merged = 0;
+  rows.forEach((row) => {
+    if (!row || typeof row !== "object") return;
+    const values = {};
+    Object.entries(row).forEach(([col, raw]) => {
+      const rule = DEPENDENT_COLUMN_RULES.find((r) => r.re.test(col));
+      if (rule && values[rule.key] === undefined) values[rule.key] = String(raw ?? "").trim();
+    });
+    if (!values.firstName && !values.lastName && !values.dob && !values.ssnLast4) return;
+    if (values.dob) values.dob = normalizeDateToIso(values.dob);
+    if (values.gender) {
+      const opt = matchChoiceOption(GENDER_OPTIONS, values.gender);
+      if (opt) values.gender = opt.value;
+    }
+    let member = appForm.householdMembers.find(
+      (m) =>
+        m.role !== "primary" &&
+        m.role !== "spouse" &&
+        values.firstName &&
+        norm(m.firstName) === norm(values.firstName) &&
+        (!m.lastName || !values.lastName || norm(m.lastName) === norm(values.lastName))
+    );
+    if (!member) {
+      member = makeBlankHouseholdMember("child");
+      appForm.householdMembers.push(member);
+    }
+    Object.entries(values).forEach(([key, v]) => {
+      if (v && !member[key]) member[key] = v;
+    });
+    merged++;
+  });
+  return merged;
+}
+
 // Whether `target` (an APP_FIELD_FIXED_GROUPS/MEMBER_SLOT_FIELDS id, e.g.
 // "member:spouse.maritalStatus") has been removed via Manage Form Fields --
 // checked at render time to skip that field's input entirely. Data already
@@ -863,7 +1168,13 @@ function countMissingRequiredFields(file) {
   let missing = 0;
   required.forEach((target) => {
     const v = resolveRequiredFieldValue(form, target);
-    if (v === undefined || v === null || !String(v).trim()) missing++;
+    // A checkbox counts as filled only when checked, and a List field only
+    // once some row has something in it -- String(false) is "false" and
+    // String([{}]) is "[object Object]", both non-blank.
+    if (v === false) missing++;
+    else if (Array.isArray(v)) {
+      if (!v.some((row) => row && Object.values(row).some((cell) => String(cell ?? "").trim()))) missing++;
+    } else if (v === undefined || v === null || !String(v).trim()) missing++;
   });
   return missing;
 }
@@ -888,32 +1199,121 @@ function appTextField(form, memberId, field, label, opts = {}) {
   return `
     <div class="bm-field${opts.wide ? " bm-appform-wide" : ""}">
       <label class="bm-field-label" for="${id}">${label}${opts.required ? " *" : ""}</label>
-      <input class="bm-input" id="${id}" type="${type}" data-field="${field}" ${memberId ? `data-member="${memberId}"` : ""} data-kind="text" value="${escapeHtml(String(value))}" />
+      <input class="bm-input" id="${id}" type="${type}" ${opts.inputMode ? `inputmode="${opts.inputMode}"` : ""} data-field="${field}" ${memberId ? `data-member="${memberId}"` : ""} data-kind="text" value="${escapeHtml(String(value))}" />
     </div>`;
 }
 
-function appTextareaField(form, memberId, field, label) {
+function appTextareaField(form, memberId, field, label, opts = {}) {
   const value = getAppFieldValue(form, memberId, field) ?? "";
   const id = appFieldId(memberId, field);
   return `
-    <div class="bm-field">
-      <label class="bm-field-label" for="${id}">${label}</label>
+    <div class="bm-field${opts.wide ? " bm-appform-wide" : ""}">
+      <label class="bm-field-label" for="${id}">${label}${opts.required ? " *" : ""}</label>
       <textarea class="bm-input bm-appform-textarea" id="${id}" data-field="${field}" ${memberId ? `data-member="${memberId}"` : ""} data-kind="text">${escapeHtml(value)}</textarea>
     </div>`;
 }
 
+// The option a stored value selects: an exact value match, else the same
+// tolerant match the PDF uses (see matchChoiceOption) -- so "Male" from an
+// older import still shows under a "male" option, and a paper entry's
+// "male" under the online form's "Male". A value matching no option at all
+// is kept as an extra option of its own rather than silently shown blank.
 function appSelectField(form, memberId, field, label, options, opts = {}) {
-  const value = getAppFieldValue(form, memberId, field) ?? "";
+  const raw = getAppFieldValue(form, memberId, field) ?? "";
+  const value = String(raw);
   const id = appFieldId(memberId, field);
   const kind = opts.kind || "discrete";
+  const chosen = options.find((o) => String(o.value) === value) || matchChoiceOption(options, value);
+  const extra = value && !chosen ? `<option value="${escapeHtml(value)}" selected>${escapeHtml(value)}</option>` : "";
   return `
     <div class="bm-field${opts.wide ? " bm-appform-wide" : ""}">
-      <label class="bm-field-label" for="${id}">${label}</label>
+      <label class="bm-field-label" for="${id}">${label}${opts.required ? " *" : ""}</label>
       <select class="bm-select" id="${id}" data-field="${field}" ${memberId ? `data-member="${memberId}"` : ""} data-kind="${kind}">
         <option value=""></option>
-        ${options.map((o) => `<option value="${o.value}" ${value === o.value ? "selected" : ""}>${o.label}</option>`).join("")}
+        ${options.map((o) => `<option value="${escapeHtml(String(o.value))}" ${chosen === o ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}
+        ${extra}
       </select>
     </div>`;
+}
+
+// A Gravity Forms multi-select answer -- arrives as a JSON-encoded array
+// string ('["A","B"]'), or is already an array once edited here.
+function multiSelectValues(raw) {
+  if (Array.isArray(raw)) return raw.map(String);
+  const s = String(raw ?? "").trim();
+  if (!s) return [];
+  if (s.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(s);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    } catch {}
+  }
+  return s.split(",").map((x) => x.trim()).filter(Boolean);
+}
+
+// A multi-select as a group of checkboxes (one per choice), stored as an
+// array of the chosen values -- see the data-kind="multi" wiring.
+function appMultiSelectField(form, memberId, field, label, options, opts = {}) {
+  const selected = multiSelectValues(getAppFieldValue(form, memberId, field));
+  const id = appFieldId(memberId, field);
+  const known = new Set(options.map((o) => String(o.value)));
+  const all = [...options, ...selected.filter((v) => !known.has(v)).map((v) => ({ value: v, label: v }))];
+  return `
+    <div class="bm-field${opts.wide ? " bm-appform-wide" : ""}">
+      <div class="bm-field-label">${label}${opts.required ? " *" : ""}</div>
+      <div class="bm-appform-checkbox-row" id="${id}" data-multi-field="${field}" ${memberId ? `data-member="${memberId}"` : ""}>
+        ${all
+          .map(
+            (o, i) => `<label class="bm-checkbox-label"><input type="checkbox" id="${id}-${i}" data-multi-option="${escapeHtml(String(o.value))}" ${selected.includes(String(o.value)) ? "checked" : ""} /> ${escapeHtml(o.label)}</label>`
+          )
+          .join("")}
+      </div>
+    </div>`;
+}
+
+// One field in whichever presentation it resolves to (see
+// resolvePresentation/customFieldPresentation). `label` is plain text;
+// `opts` carries required/wide/kind through to the builder. A date/month
+// input can only show an ISO value, so a stored value in any other format
+// (e.g. a paper entry typed as "11/2026") falls back to a plain text box
+// rather than being displayed blank.
+function appPresentedField(form, memberId, field, label, presentation, opts = {}) {
+  const p = presentation || { kind: "text" };
+  const safeLabel = escapeHtml(label);
+  const value = getAppFieldValue(form, memberId, field);
+  const str = value === undefined || value === null ? "" : String(value);
+  switch (p.kind) {
+    case "select":
+      return appSelectField(form, memberId, field, safeLabel, p.options || [], opts);
+    case "multiselect":
+      return appMultiSelectField(form, memberId, field, safeLabel, p.options || [], opts);
+    case "checkbox":
+      return `<div class="bm-field${opts.wide ? " bm-appform-wide" : ""} bm-appform-custom-checkbox">${appCheckboxField(form, memberId, field, `${safeLabel}${opts.required ? " *" : ""}`, { kind: opts.kind })}</div>`;
+    case "textarea":
+      return appTextareaField(form, memberId, field, safeLabel, { ...opts, wide: true });
+    case "list":
+      return appListField(form, memberId, field, label, { columns: p.columns });
+    case "date":
+      return appTextField(form, memberId, field, safeLabel, { ...opts, type: !str || /^\d{4}-\d{2}-\d{2}$/.test(str) ? "date" : "text" });
+    case "month":
+      return appTextField(form, memberId, field, safeLabel, { ...opts, type: !str || /^\d{4}-\d{2}$/.test(str) ? "month" : "text" });
+    case "number":
+      // Deliberately not type="number": the online form's number answers
+      // can carry formatting ("$4,800"), which a number input would show
+      // as blank.
+      return appTextField(form, memberId, field, safeLabel, { ...opts, inputMode: "decimal" });
+    default:
+      return appTextField(form, memberId, field, safeLabel, { ...opts, type: p.inputType || "text" });
+  }
+}
+
+// A built-in field, shown per the online form when it's connected to one.
+// `target` is its mapping target ("member:primary.gender",
+// "household.incomeTier", ...), or null for a member not in the mapping
+// catalog (see memberFieldScope) -- which always keeps `builtin`.
+function appMappedField(form, memberId, field, label, target, builtin, opts = {}) {
+  const presentation = target ? resolvePresentation(target, builtin, currentFieldMapping()) : builtin;
+  return appPresentedField(form, memberId, field, label, presentation, opts);
 }
 
 function appCheckboxField(form, memberId, field, label, opts = {}) {
@@ -925,6 +1325,60 @@ function appCheckboxField(form, memberId, field, label, opts = {}) {
       <input type="checkbox" id="${id}" data-field="${field}" ${memberId ? `data-member="${memberId}"` : ""} data-kind="${kind}" ${opts.togglesExpense ? `data-toggles-expense="${opts.togglesExpense}"` : ""} ${value ? "checked" : ""} ${opts.disabled ? "disabled" : ""} />
       ${label}
     </label>`;
+}
+
+// A List custom field as an editable table -- one row per list entry, one
+// column per list column. Cells aren't dot-path data-field inputs like every
+// other field here (a column name can itself contain a "."), so they carry
+// their own data-list-* attributes instead and get their own wiring in
+// wireApplicationForm. `field` is the dot-path to the array itself (e.g.
+// "extraFields.list").
+function appListField(form, memberId, field, label, def) {
+  const rows = getAppFieldValue(form, memberId, field);
+  const list = Array.isArray(rows) ? rows : [];
+  const columns = listFieldColumns(def, list);
+  const memberAttr = memberId ? `data-member="${memberId}"` : "";
+  const idBase = appFieldId(memberId, field);
+  const body = list
+    .map(
+      (row, r) => `
+        <tr>
+          ${columns
+            .map(
+              (col, c) =>
+                `<td><input class="bm-input" id="${idBase}-r${r}-c${c}" type="text" data-list-field="${field}" ${memberAttr} data-row="${r}" data-col="${escapeHtml(col)}" aria-label="${escapeHtml(col)}" value="${escapeHtml(String((row && row[col]) ?? ""))}" /></td>`
+            )
+            .join("")}
+          <td class="bm-appform-list-actions"><button class="bm-btn bm-btn-ghost bm-btn-sm" data-action="remove-list-row" data-list-field="${field}" ${memberAttr} data-row="${r}" title="Remove this row">${ICONS.x}</button></td>
+        </tr>`
+    )
+    .join("");
+  return `
+    <div class="bm-field bm-appform-wide">
+      <div class="bm-field-label">${escapeHtml(label)}</div>
+      ${
+        columns.length
+          ? `<div class="bm-appform-list-wrap">
+              <table class="bm-appform-list">
+                <thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}<th></th></tr></thead>
+                <tbody>${body || `<tr><td class="bm-appform-list-empty" colspan="${columns.length + 1}">No entries</td></tr>`}</tbody>
+              </table>
+            </div>
+            <button class="bm-btn bm-btn-ghost bm-btn-sm" data-action="add-list-row" data-list-field="${field}" ${memberAttr} data-columns="${escapeHtml(JSON.stringify(columns))}">${ICONS.plus} Add row</button>`
+          : `<div class="bm-rail-empty">No entries</div>`
+      }
+    </div>`;
+}
+
+// One custom field (a .form-schema.json customFields entry), rendered per
+// its presentation (the online form's when connected, else its own type --
+// see customFieldPresentation) -- shared by the per-member and household/
+// church renderers below so a field looks the same wherever it's scoped.
+function appCustomFieldHtml(form, memberId, def) {
+  const field = `extraFields.${def.key}`;
+  const presentation = customFieldPresentation(def, getAppFieldValue(form, memberId, field), currentFieldMapping());
+  const required = isFieldRequired(customFieldTarget(def));
+  return appPresentedField(form, memberId, field, def.label, presentation, { wide: true, required });
 }
 
 // ---- Rendering ----
@@ -980,13 +1434,16 @@ function renderHealthQuestionnaireHtml(member, file) {
   const health = member.health;
   const scope = memberFieldScope(member);
   const healthRemoved = (key) => !!scope && isFieldRemoved(`member:${scope}.${key}`);
+  // Shown per the online form where connected -- see appMappedField.
+  const mapped = (key, label, builtin) =>
+    appMappedField(form, member.id, key, label, scope ? `member:${scope}.${key}` : null, builtin, { required: !!scope && isFieldRequired(`member:${scope}.${key}`) });
   return `
     <div class="bm-appform-health">
       <div class="bm-section-label">Health history</div>
       <div class="bm-appform-grid">
-        ${healthRemoved("health.height") ? "" : appTextField(form, member.id, "health.height", "Height")}
-        ${healthRemoved("health.weight") ? "" : appTextField(form, member.id, "health.weight", "Weight")}
-        ${healthRemoved("health.tobaccoUse") ? "" : appSelectField(form, member.id, "health.tobaccoUse", "Vaping or tobacco use?", YES_NO_OPTIONS)}
+        ${healthRemoved("health.height") ? "" : mapped("health.height", "Height", { kind: "text" })}
+        ${healthRemoved("health.weight") ? "" : mapped("health.weight", "Weight", { kind: "text" })}
+        ${healthRemoved("health.tobaccoUse") ? "" : mapped("health.tobaccoUse", "Vaping or tobacco use?", { kind: "select", options: YES_NO_OPTIONS })}
       </div>
       ${
         healthRemoved("health.noPastMedicalHistory")
@@ -1009,7 +1466,7 @@ function renderHealthQuestionnaireHtml(member, file) {
               ${appCheckboxField(form, member.id, "health.noPastSurgicalHistory", "No past surgical history", { kind: "structural" })}
             </div>`
       }
-      ${health.noPastSurgicalHistory || healthRemoved("health.pastSurgicalHistoryText") ? "" : appTextareaField(form, member.id, "health.pastSurgicalHistoryText", "Past surgeries")}
+      ${health.noPastSurgicalHistory || healthRemoved("health.pastSurgicalHistoryText") ? "" : mapped("health.pastSurgicalHistoryText", "Past surgeries", { kind: "textarea" })}
       ${
         healthRemoved("health.noMedications")
           ? ""
@@ -1017,7 +1474,7 @@ function renderHealthQuestionnaireHtml(member, file) {
               ${appCheckboxField(form, member.id, "health.noMedications", "No current medications", { kind: "structural" })}
             </div>`
       }
-      ${health.noMedications || healthRemoved("health.currentMedicationsText") ? "" : appTextareaField(form, member.id, "health.currentMedicationsText", "Current medications (dose & frequency)")}
+      ${health.noMedications || healthRemoved("health.currentMedicationsText") ? "" : mapped("health.currentMedicationsText", "Current medications (dose & frequency)", { kind: "textarea" })}
     </div>`;
 }
 
@@ -1051,16 +1508,23 @@ function renderMemberFieldsHtml(member, file) {
   const form = file.appForm;
   const scope = memberFieldScope(member);
   migrateMedicarePart(member);
+  // Each shown per the online form where connected (e.g. Marital status as
+  // the online form's dropdown rather than a text box) -- see
+  // appMappedField. A member outside the mapping catalog (scope null)
+  // always keeps the built-in presentation.
+  const mapped = (key, label, builtin) =>
+    appMappedField(form, member.id, key, label, scope ? `member:${scope}.${key}` : null, builtin, { required: !!scope && isFieldRequired(`member:${scope}.${key}`) });
+  const TEXT = { kind: "text" };
   const FIELD_RENDERERS = {
-    firstName: () => appTextField(form, member.id, "firstName", "First name", { required: !!scope && isFieldRequired(`member:${scope}.firstName`) }),
-    initial: () => appTextField(form, member.id, "initial", "MI"),
-    lastName: () => appTextField(form, member.id, "lastName", "Last name", { required: !!scope && isFieldRequired(`member:${scope}.lastName`) }),
-    dob: () => appTextField(form, member.id, "dob", "DOB", { type: "date", required: !!scope && isFieldRequired(`member:${scope}.dob`) }),
-    ssnLast4: () => appTextField(form, member.id, "ssnLast4", "Last 4 of SSN"),
-    gender: () => appSelectField(form, member.id, "gender", "Gender", GENDER_OPTIONS),
-    ssExempt: () => appSelectField(form, member.id, "ssExempt", "Social Security exempt?", YES_NO_OPTIONS),
-    maritalStatus: () => appTextField(form, member.id, "maritalStatus", "Marital status", { required: !!scope && isFieldRequired(`member:${scope}.maritalStatus`) }),
-    medicarePart: () => appSelectField(form, member.id, "medicarePart", "Medicare", MEDICARE_OPTIONS),
+    firstName: () => mapped("firstName", "First name", TEXT),
+    initial: () => mapped("initial", "MI", TEXT),
+    lastName: () => mapped("lastName", "Last name", TEXT),
+    dob: () => mapped("dob", "DOB", { kind: "date" }),
+    ssnLast4: () => mapped("ssnLast4", "Last 4 of SSN", TEXT),
+    gender: () => mapped("gender", "Gender", { kind: "select", options: GENDER_OPTIONS }),
+    ssExempt: () => mapped("ssExempt", "Social Security exempt?", { kind: "select", options: YES_NO_OPTIONS }),
+    maritalStatus: () => mapped("maritalStatus", "Marital status", TEXT),
+    medicarePart: () => mapped("medicarePart", "Medicare", { kind: "select", options: MEDICARE_OPTIONS }),
   };
   if (!scope) {
     return ["firstName", "initial", "lastName", "dob", "ssnLast4", "gender"].map((k) => FIELD_RENDERERS[k]()).join("");
@@ -1073,7 +1537,7 @@ function renderMemberFieldsHtml(member, file) {
     .map((row) => {
       if (row.customKey) {
         const def = customFieldDefs.find((c) => c.key === row.customKey && c.scope === scope);
-        return def ? appTextField(form, member.id, `extraFields.${def.key}`, def.label, { wide: true }) : "";
+        return def ? appCustomFieldHtml(form, member.id, def) : "";
       }
       const renderer = FIELD_RENDERERS[row.id.slice(prefix.length)];
       return renderer ? renderer() : "";
@@ -1134,27 +1598,30 @@ function renderDependentMemberCategoryHtml(member, file) {
 // Fields, the API mapping modal, and here). See renderMemberFieldsHtml for
 // the per-member equivalent.
 function renderHouseholdFieldsHtml(form, scope = "household") {
-  const reqH = (key) => isFieldRequired(`household.${key}`);
+  // Each shown per the online form where connected -- see appMappedField.
+  const mapped = (key, label, builtin, opts = {}) =>
+    appMappedField(form, null, `household.${key}`, label, `household.${key}`, builtin, { ...opts, required: isFieldRequired(`household.${key}`) });
+  const TEXT = { kind: "text" };
   const FIELD_RENDERERS = {
-    address: () => appTextField(form, null, "household.address", "Address", { required: reqH("address"), wide: true }),
-    city: () => appTextField(form, null, "household.city", "City", { required: reqH("city") }),
-    state: () => appTextField(form, null, "household.state", "State", { required: reqH("state") }),
-    zip: () => appTextField(form, null, "household.zip", "ZIP", { required: reqH("zip") }),
-    phone: () => appTextField(form, null, "household.phone", "Phone", { required: reqH("phone") }),
-    emailOrFax: () => appTextField(form, null, "household.emailOrFax", "Email/Fax", { required: reqH("emailOrFax") }),
-    incomeTier: () => appSelectField(form, null, "household.incomeTier", "Household income tier", INCOME_TIERS, { wide: true }),
-    seventyPercentApplying: () => appSelectField(form, null, "household.seventyPercentApplying", "70%+ of church applying?", YES_NO_OPTIONS),
-    effectiveStartDate: () => appTextField(form, null, "household.effectiveStartDate", "Effective start date", { type: "month", required: reqH("effectiveStartDate") }),
-    previousPlanName: () => appTextField(form, null, "household.previousPlanName", "Previous medical aid plan (if any)"),
-    previousPlanAnnualCost: () => appTextField(form, null, "household.previousPlanAnnualCost", "Previous plan annual cost", { type: "number" }),
-    churchName: () => appTextField(form, null, "household.churchName", "Church name", { required: reqH("churchName"), wide: true }),
-    churchContactName: () => appTextField(form, null, "household.churchContactName", "Church contact"),
-    churchContactPhone: () => appTextField(form, null, "household.churchContactPhone", "Church contact phone"),
-    churchContactEmailOrFax: () => appTextField(form, null, "household.churchContactEmailOrFax", "Church contact email/fax"),
-    churchContactAddress: () => appTextField(form, null, "household.churchContactAddress", "Church contact address", { wide: true }),
-    churchContactCity: () => appTextField(form, null, "household.churchContactCity", "Church contact city"),
-    churchContactState: () => appTextField(form, null, "household.churchContactState", "Church contact state"),
-    churchContactZip: () => appTextField(form, null, "household.churchContactZip", "Church contact ZIP"),
+    address: () => mapped("address", "Address", TEXT, { wide: true }),
+    city: () => mapped("city", "City", TEXT),
+    state: () => mapped("state", "State", TEXT),
+    zip: () => mapped("zip", "ZIP", TEXT),
+    phone: () => mapped("phone", "Phone", TEXT),
+    emailOrFax: () => mapped("emailOrFax", "Email/Fax", TEXT),
+    incomeTier: () => mapped("incomeTier", "Household income tier", { kind: "select", options: INCOME_TIERS }, { wide: true }),
+    seventyPercentApplying: () => mapped("seventyPercentApplying", "70%+ of church applying?", { kind: "select", options: YES_NO_OPTIONS }),
+    effectiveStartDate: () => mapped("effectiveStartDate", "Effective start date", { kind: "month" }),
+    previousPlanName: () => mapped("previousPlanName", "Previous medical aid plan (if any)", TEXT),
+    previousPlanAnnualCost: () => mapped("previousPlanAnnualCost", "Previous plan annual cost", { kind: "number" }),
+    churchName: () => mapped("churchName", "Church name", TEXT, { wide: true }),
+    churchContactName: () => mapped("churchContactName", "Church contact", TEXT),
+    churchContactPhone: () => mapped("churchContactPhone", "Church contact phone", TEXT),
+    churchContactEmailOrFax: () => mapped("churchContactEmailOrFax", "Church contact email/fax", TEXT),
+    churchContactAddress: () => mapped("churchContactAddress", "Church contact address", TEXT, { wide: true }),
+    churchContactCity: () => mapped("churchContactCity", "Church contact city", TEXT),
+    churchContactState: () => mapped("churchContactState", "Church contact state", TEXT),
+    churchContactZip: () => mapped("churchContactZip", "Church contact ZIP", TEXT),
   };
   const customFieldDefs = (typeof state !== "undefined" && state.customFieldDefs) || [];
   const slotCount = manageFieldsSlotCount(customFieldDefs);
@@ -1163,7 +1630,7 @@ function renderHouseholdFieldsHtml(form, scope = "household") {
     .map((row) => {
       if (row.customKey) {
         const def = customFieldDefs.find((c) => c.key === row.customKey && (c.scope || "household") === scope);
-        return def ? appTextField(form, null, `extraFields.${def.key}`, def.label, { wide: true }) : "";
+        return def ? appCustomFieldHtml(form, null, def) : "";
       }
       const renderer = FIELD_RENDERERS[row.id.slice("household.".length)];
       return renderer ? renderer() : "";
@@ -1324,6 +1791,81 @@ function wireApplicationForm(panel, file) {
     });
   });
 
+  // List-field cells (see appListField) -- same debounced-save/undo-on-blur
+  // behavior as a plain text field above, just writing into one row/column
+  // of the list's array instead of a dot-path.
+  const listRows = (el) => {
+    const rows = getAppFieldValue(form, el.dataset.member, el.dataset.listField);
+    if (Array.isArray(rows)) return rows;
+    const fresh = [];
+    setAppFieldValue(form, el.dataset.member, el.dataset.listField, fresh);
+    return fresh;
+  };
+  panel.querySelectorAll("input[data-list-field]").forEach((input) => {
+    const snapKey = `${input.dataset.listField}:${input.dataset.member || ""}:${input.dataset.row}:${input.dataset.col}`;
+    input.addEventListener("focus", () => {
+      appFormFieldSnapshot[snapKey] = JSON.stringify(form);
+    });
+    input.addEventListener("input", () => {
+      const rows = listRows(input);
+      const r = Number(input.dataset.row);
+      if (!rows[r] || typeof rows[r] !== "object") rows[r] = {};
+      rows[r][input.dataset.col] = input.value;
+      scheduleAppFormSave(file);
+      patchRequiredBadge(panel, file);
+    });
+    input.addEventListener("blur", () => {
+      const before = appFormFieldSnapshot[snapKey];
+      delete appFormFieldSnapshot[snapKey];
+      if (before == null || before === JSON.stringify(form)) return;
+      pushUndo("Edit application field", () => {
+        file.appForm = JSON.parse(before);
+        return saveAppForm(file);
+      });
+    });
+  });
+
+  panel.querySelectorAll('[data-action="add-list-row"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const rows = listRows(btn);
+      let columns = [];
+      try {
+        columns = JSON.parse(btn.dataset.columns || "[]");
+      } catch {}
+      const row = {};
+      columns.forEach((col) => (row[col] = ""));
+      rows.push(row);
+      saveAppForm(file);
+      render();
+    });
+  });
+
+  panel.querySelectorAll('[data-action="remove-list-row"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const before = JSON.stringify(form);
+      listRows(btn).splice(Number(btn.dataset.row), 1);
+      saveAppForm(file);
+      pushUndo("Remove list row", () => {
+        file.appForm = JSON.parse(before);
+        return saveAppForm(file);
+      });
+      render();
+    });
+  });
+
+  // Multi-select checkbox groups (see appMultiSelectField) -- saved as an
+  // array of the checked choices' values, immediately, like a discrete field.
+  panel.querySelectorAll("[data-multi-field]").forEach((group) => {
+    group.querySelectorAll("input[data-multi-option]").forEach((box) => {
+      box.addEventListener("change", () => {
+        const values = [...group.querySelectorAll("input[data-multi-option]:checked")].map((b) => b.dataset.multiOption);
+        setAppFieldValue(form, group.dataset.member, group.dataset.multiField, values);
+        saveAppForm(file);
+        patchRequiredBadge(panel, file);
+      });
+    });
+  });
+
   panel.querySelectorAll('[data-field][data-kind="discrete"]').forEach((input) => {
     input.addEventListener("change", () => {
       const value = input.type === "checkbox" ? input.checked : input.value;
@@ -1395,11 +1937,31 @@ function wireApplicationForm(panel, file) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     CONDITION_CATEGORIES,
+    INCOME_TIERS,
+    YES_NO_OPTIONS,
+    GENDER_OPTIONS,
+    MEDICARE_OPTIONS,
     makeBlankHealthRecord,
     makeBlankHouseholdMember,
     makeBlankAppForm,
     APP_FIELD_FIXED_GROUPS,
     MEMBER_SLOT_FIELDS,
     DEFAULT_REQUIRED_FIELDS,
+    DEPENDENTS_TARGET,
+    customFieldTarget,
+    matchChoiceOption,
+    gfFieldInfo,
+    enrichFieldMapping,
+    gfPresentationForTarget,
+    presentationFromGfInfo,
+    customFieldPresentation,
+    NO_HISTORY_FLAG_KEYS,
+    interpretNoFlagAnswer,
+    CHURCH_FIELD_KEYS,
+    multiSelectValues,
+    effectiveCustomFieldType,
+    listFieldColumns,
+    mergeDependentRows,
+    normalizeDateToIso,
   };
 }
