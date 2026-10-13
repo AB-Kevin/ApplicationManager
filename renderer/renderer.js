@@ -183,6 +183,7 @@ const state = {
   commenterName: "", // per-device name signed onto new comments — see main.js's settings.json
   commenterModalOpen: false, // shown unskippably on first launch (no commenterName yet), or on demand from the Options dialog
   commenterNameDraft: "", // working copy of commenterName while the name modal is open
+  abAppsName: "", // name of whoever's signed in to AB Apps, if anyone — overrides commenterName when set, see commentSignerName()
   settingsModalOpen: false, // the rail's "Options" dialog — a home for per-device settings (currently comment name + theme + autoexport folder)
   theme: "system", // "system" | "light" | "dark" | "midnight" — per-device, see main.js's settings.json and resolveTheme()
   autoexportFolder: "", // per-device absolute folder the Autoexport button files things into — see main.js's settings.json; asked for on first use, changeable from Options
@@ -695,7 +696,7 @@ const appFormDebounce = {};
 
 function saveAppForm(file) {
   file.appForm.meta.updatedAt = new Date().toISOString();
-  file.appForm.meta.lastEditedBy = state.commenterName || "Unknown";
+  file.appForm.meta.lastEditedBy = commentSignerName() || "Unknown";
   const promise = window.api.saveAppForm(state.folder, file.path, file.appForm);
   pendingMetaWrites.add(promise);
   const forget = () => pendingMetaWrites.delete(promise);
@@ -733,9 +734,10 @@ const commentEditSnapshot = {};
 // whoever reads it later knows who wrote it and when. Uses commenterName as
 // typed/stored in settings.json (see main.js) rather than any OS-level
 // account name, since one device can be shared and the name is meant to be
-// whatever the person answered the "Your name for comments" prompt with.
+// whatever the person answered the "Your name for comments" prompt with —
+// unless someone's signed in to AB Apps, whose name wins (see commentSignerName).
 function commentAttributionLine() {
-  const name = state.commenterName || "Unknown";
+  const name = commentSignerName() || "Unknown";
   const stamp = new Date().toLocaleString(undefined, {
     year: "numeric",
     month: "short",
@@ -3589,11 +3591,19 @@ function renderSettingsModal() {
             </div>
           </div>
           <div class="bm-settings-row">
-            <div>
+            ${
+              state.abAppsName
+                ? `<div>
+              <div class="bm-settings-row-label">Comment name</div>
+              <div class="bm-settings-row-value">${escapeHtml(state.abAppsName)}</div>
+              <div class="bm-settings-row-value">From AB Apps. A manager can change it in AB Apps.</div>
+            </div>`
+                : `<div>
               <div class="bm-settings-row-label">Comment name</div>
               <div class="bm-settings-row-value">${escapeHtml(state.commenterName || "Not set")}</div>
             </div>
-            <button class="bm-btn bm-btn-secondary bm-btn-sm" id="settings-change-name-btn">Change</button>
+            <button class="bm-btn bm-btn-secondary bm-btn-sm" id="settings-change-name-btn">Change</button>`
+            }
           </div>
           <div class="bm-settings-row">
             <div>
@@ -3617,7 +3627,8 @@ function renderSettingsModal() {
   overlay.querySelectorAll(".bm-theme-toggle-btn").forEach((btn) => {
     btn.addEventListener("click", () => setTheme(btn.dataset.themeChoice));
   });
-  overlay.querySelector("#settings-change-name-btn").addEventListener("click", () => {
+  // Absent while the name comes from AB Apps -- it can't be changed here then.
+  overlay.querySelector("#settings-change-name-btn")?.addEventListener("click", () => {
     state.settingsModalOpen = false;
     openCommenterNameModal();
   });
@@ -4677,6 +4688,27 @@ function renderApiImportModal() {
 // signs onto every new comment. Shown unskippably on first launch — there's
 // no Cancel/✕/backdrop-close/Escape until a name has actually been saved —
 // and reopenable any time after that from the Options dialog to change it.
+// Both are skipped while someone's signed in to AB Apps, whose name takes
+// over (see main.js's readAbAppsName) without ever replacing commenterName.
+function commentSignerName() {
+  return state.abAppsName || state.commenterName;
+}
+
+// Pushed from main.js whenever AB Apps signs someone in or out (or renames
+// them) while the app is open. Signing in closes the name prompt — it's moot
+// now; signing out with no device name to fall back on reopens it, just like
+// first launch. Opened directly rather than via openCommenterNameModal so it
+// stacks over (instead of discarding) anything else that's open.
+function setAbAppsName(name) {
+  state.abAppsName = name || "";
+  if (state.abAppsName) state.commenterModalOpen = false;
+  else if (!state.commenterName && !state.commenterModalOpen) {
+    state.commenterNameDraft = "";
+    state.commenterModalOpen = true;
+  }
+  render();
+}
+
 function openCommenterNameModal() {
   if (state.tagModalOpen) closeTagManager(false);
   if (state.aboutOpen) closeAbout();
@@ -4763,7 +4795,9 @@ function renderCommenterNameModal() {
   state.appVersion = await window.api.getAppVersion();
   state.commenterName = (await window.api.getCommenterName()) || "";
   state.commenterNameDraft = state.commenterName;
-  if (!state.commenterName) state.commenterModalOpen = true;
+  state.abAppsName = (await window.api.getAbAppsName()) || "";
+  if (!commentSignerName()) state.commenterModalOpen = true;
+  window.api.onAbAppsName((name) => setAbAppsName(name));
   state.autoexportFolder = (await window.api.getAutoexportFolder()) || "";
   window.api.onUpdateStatus((status) => setUpdateStatus(status));
   window.api.onRollbackStatus((status) => {
