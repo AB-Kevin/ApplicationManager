@@ -64,12 +64,26 @@ function normalizeRecord(raw) {
   if (raw.legacy) rec.legacy = raw.legacy;
   if (raw.id) rec.id = raw.id;
   rec.meta = { ...(raw.meta || {}) };
-  // Records used to have a free-text Notes field; comments (signed with who
-  // wrote them) replaced it. Anything already written there is kept, out of
-  // sight, rather than dropped the next time the record is saved.
-  if (raw.notes && String(raw.notes).trim() && !rec.meta.notes) rec.meta.notes = String(raw.notes).trim();
+  // Comments on a row with no file behind it -- an application file keeps
+  // its own in the file's metadata (see main.js's readFileMeta). Same signed
+  // strings either way (see commentAttributionLine in renderer.js).
+  if (Array.isArray(raw.comments)) rec.comments = raw.comments.map(String);
+  // Records used to have a free-text Notes field; comments replaced it, so
+  // anything written there carries over as a comment signed with where it
+  // came from. Version 0.2.0 tucked old notes into meta.notes instead, so a
+  // record it saved is picked up from there.
+  const oldNotes = String(raw.notes || rec.meta.notes || "").trim();
+  delete rec.meta.notes;
+  if (oldNotes) rec.comments = [...(rec.comments || []), importedComment(oldNotes, rec.meta.importedFrom)];
   rec.version = RECORD_VERSION;
   return rec;
+}
+
+// A comment brought in from somewhere other than this app -- an old
+// spreadsheet's Notes/Comments cell, or a record's old Notes field. Signed
+// like any other comment, with the source in place of a person's name.
+function importedComment(text, source) {
+  return `${text}\n— Imported from ${source || "the old tracker spreadsheet"}`;
 }
 
 function recordStatus(rec) {
@@ -256,6 +270,7 @@ if (typeof module !== "undefined" && module.exports) {
     STATUSES,
     makeBlankRecord,
     normalizeRecord,
+    importedComment,
     recordStatus,
     statusLabel,
     todayIso,

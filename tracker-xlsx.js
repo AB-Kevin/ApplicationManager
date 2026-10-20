@@ -6,7 +6,7 @@
 
 const ExcelJS = require("exceljs");
 const path = require("path");
-const { makeBlankRecord, normalizeDateToIso, recordStatus, statusLabel, buildPlanSummary, formatDisplayDate } = require("./renderer/application-form.js");
+const { makeBlankRecord, importedComment, normalizeDateToIso, recordStatus, statusLabel, buildPlanSummary, formatDisplayDate } = require("./renderer/application-form.js");
 
 // ---- Import ----
 
@@ -37,7 +37,7 @@ const HEADER_FIELDS = [
   [/^card\s*sent\s*date$/i, "cardSentDate"],
   [/^card\s*sent$/i, "cardSent"],
   [/^status$/i, "status"],
-  [/^notes?$/i, "notes"],
+  [/^(notes?|comments?)$/i, "comments"],
 ];
 
 function fieldForHeader(text) {
@@ -47,6 +47,18 @@ function fieldForHeader(text) {
 }
 
 // "MAAP Members" -> "MAAP" -- the old tracker kept one sheet per plan.
+// A Comments cell this app exported holds a row's signed comments one after
+// another (see addMembersSheet), so it's split back apart after each
+// signature line. Unsigned text -- an old tracker's Notes -- becomes one
+// comment signed with the file it came from.
+function commentsFromCell(text, source) {
+  return text
+    .split(/(?<=\n— [^\n]*)\n\n/)
+    .map((c) => c.trim())
+    .filter(Boolean)
+    .map((c) => (/\n— [^\n]*$/.test(c) ? c : importedComment(c, source)));
+}
+
 function planFromSheetName(name) {
   return String(name || "").replace(/\s+(members?|member list)$/i, "").trim();
 }
@@ -96,10 +108,8 @@ async function readTrackerWorkbook(filePath) {
       // went out, and plenty of Complete rows never got a Card Sent Date.
       rec.cardSent = cardSentCell != null ? /^(yes|true|x|1)$/i.test(String(cardSentCell).trim()) || cardSentCell === true : /^complete$/i.test(status) || !!rec.cardSentDate;
       rec.meta = { source: "spreadsheet", importedFrom: path.basename(filePath) };
-      // No Notes field on a record any more (see normalizeRecord) -- an old
-      // spreadsheet's notes are kept out of sight with the import details.
-      const notes = String(get("notes") ?? "").trim();
-      if (notes) rec.meta.notes = notes;
+      const comments = String(get("comments") ?? "").trim();
+      if (comments) rec.comments = commentsFromCell(comments, rec.meta.importedFrom);
       records.push(rec);
     }
     sheets.push({ plan, records });
@@ -150,6 +160,7 @@ function addMembersSheet(wb, plan, records) {
     { header: "Card Sent", key: "cardSent", width: 11 },
     { header: "Card Sent Date", key: "cardSentDate", width: 16, date: true },
     { header: "Status", key: "status", width: 16 },
+    { header: "Comments", key: "comments", width: 50 },
     { header: "File", key: "file", width: 40 },
   ];
   columns.forEach((c, i) => (ws.getColumn(i + 1).width = c.width));
@@ -166,9 +177,13 @@ function addMembersSheet(wb, plan, records) {
       if (c.date) return excelDate(r[c.key]);
       if (c.key === "cardSent") return r.cardSent ? "Yes" : "No";
       if (c.key === "status") return statusLabel(recordStatus(r));
+      if (c.key === "comments") return (r.comments || []).join("\n\n") || null;
       return r[c.key] || null;
     });
-    columns.forEach((c, ci) => c.date && (row.getCell(ci + 1).numFmt = "d-mmm-yyyy"));
+    columns.forEach((c, ci) => {
+      if (c.date) row.getCell(ci + 1).numFmt = "d-mmm-yyyy";
+      if (c.key === "comments") row.getCell(ci + 1).alignment = { wrapText: true, vertical: "top" };
+    });
   });
   ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4 + sorted.length, column: columns.length } };
 }

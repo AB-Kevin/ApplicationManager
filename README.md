@@ -143,7 +143,9 @@ per platform automatically, so this can be run entirely from Windows.
   Import spreadsheet…, a one-time import that skips rows already present)
   or added by hand with "Add row". Those live one per file in a hidden
   `.records` folder, so two people editing different rows on a shared
-  OneDrive folder never collide.
+  OneDrive folder never collide. A spreadsheet's Notes (or Comments) column
+  comes in as a comment signed "Imported from <file name>" — the same goes
+  for anything typed into the Notes field older versions had.
 - Setting an application's entry date (in the preview pane, a Tracker cell,
   or "Entered today" on a batch) moves its file into an `Entered` subfolder
   (created if missing), so the folder tree shows at a glance what's been
@@ -153,7 +155,9 @@ per platform automatically, so this can be run entirely from Windows.
 - Summary: per plan, the running totals plus the old spreadsheet's monthly
   (for a chosen year) and weekly (last 10 weeks) tables, counted by
   Application Entry Date. "Export to Excel" (Tracker or Summary) saves a
-  workbook with a Members sheet and a Summary sheet per plan in scope.
+  workbook with a Members sheet and a Summary sheet per plan in scope; the
+  Members sheet's Comments column holds each row's comments, and imports
+  back in as separate comments.
 - The rail's "Online Applications" section connects the folder to a Gravity
   Forms-powered web form (via its REST API, using a consumer key/secret
   entered once through "Connect") so submissions can be imported alongside

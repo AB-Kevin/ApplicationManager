@@ -732,6 +732,13 @@ function allRows() {
   return [...state.files.map(rowForFile), ...state.records.map(rowForRecord)];
 }
 
+// A file's comments live in its own metadata; a record-only row's (e.g. an
+// old spreadsheet's Notes, see application-form.js's importedComment) in
+// the record itself.
+function rowComments(row) {
+  return [...(row.file ? row.file.comments : []), ...(row.record.comments || [])];
+}
+
 // Same in-flight tracking as saveFileMeta, so a refresh can't race ahead of
 // this write.
 function trackWrite(promise) {
@@ -2357,7 +2364,7 @@ function trackerFilteredRows() {
     if (state.trackerStatus !== "all" && recordStatus(row.record) !== state.trackerStatus) return false;
     if (!q) return true;
     const r = row.record;
-    return [r.name, r.memberId, row.file && row.file.name].some((s) => s && String(s).toLowerCase().includes(q));
+    return [r.name, r.memberId, row.file && row.file.name, ...rowComments(row)].some((s) => s && String(s).toLowerCase().includes(q));
   });
   return sortTrackerRows(rows);
 }
@@ -2454,7 +2461,7 @@ function renderTrackerMain() {
           <label class="bm-field-label" for="tracker-search">Search</label>
           <div class="bm-search-input-wrap">
             ${ICONS.search}
-            <input class="bm-input" id="tracker-search" placeholder="Name, member ID, or file…" value="${escapeAttr(state.trackerSearch)}" />
+            <input class="bm-input" id="tracker-search" placeholder="Name, member ID, comments, or file…" value="${escapeAttr(state.trackerSearch)}" />
           </div>
         </div>
         <div class="bm-field">
@@ -2632,6 +2639,7 @@ async function exportTracker() {
         startDate: r.startDate,
         cardSent: r.cardSent,
         cardSentDate: r.cardSentDate,
+        comments: rowComments({ record: r, file }),
         file: file ? file.path : "",
       })),
   }));
