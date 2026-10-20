@@ -40,7 +40,6 @@ function makeBlankRecord(plan) {
     startDate: "",
     cardSent: false,
     cardSentDate: "", // stamped automatically when cardSent is checked (see setCardSent)
-    notes: "",
     meta: {},
   };
 }
@@ -65,6 +64,10 @@ function normalizeRecord(raw) {
   if (raw.legacy) rec.legacy = raw.legacy;
   if (raw.id) rec.id = raw.id;
   rec.meta = { ...(raw.meta || {}) };
+  // Records used to have a free-text Notes field; comments (signed with who
+  // wrote them) replaced it. Anything already written there is kept, out of
+  // sight, rather than dropped the next time the record is saved.
+  if (raw.notes && String(raw.notes).trim() && !rec.meta.notes) rec.meta.notes = String(raw.notes).trim();
   rec.version = RECORD_VERSION;
   return rec;
 }
@@ -230,10 +233,6 @@ function renderApplicationFieldsHtml(row) {
           <input type="checkbox" id="app-card-sent" ${rec.cardSent ? "checked" : ""} />
           Member card sent${rec.cardSent && rec.cardSentDate ? `<span class="bm-appfields-caption">on ${formatDisplayDate(rec.cardSentDate)}</span>` : ""}
         </label>
-        <div class="bm-field bm-appfields-wide">
-          <label class="bm-field-label" for="app-notes">Notes</label>
-          <textarea class="bm-input bm-appfields-notes" id="app-notes" data-app-field="notes" data-kind="text">${escapeHtml(rec.notes)}</textarea>
-        </div>
       </div>
     </div>`;
 }

@@ -100,8 +100,8 @@ per platform automatically, so this can be run entirely from Windows.
   than staying tied to one machine's install of the app. It's skipped by the
   file grid and folder tree like any other dotfile.
 - Each application's record — Plan, Name, Member ID, Application Entry
-  Date, Member Start Date, and Member Card Sent (plus Notes; the date the
-  card was marked sent is recorded automatically) — is edited in the
+  Date, Member Start Date, and Member Card Sent (the date the card was
+  marked sent is recorded automatically) — is edited in the
   preview pane's Application section or straight in the Tracker, and saved
   into a hidden per-file sidecar next to the source file itself, named
   `.<filename>.appform.json` — e.g. `Smith Family Scan.pdf` gets a
@@ -109,8 +109,8 @@ per platform automatically, so this can be run entirely from Windows.
   version 0.1.x (the old full paper-form schema) still opens: its primary
   member's name carries over, and the rest is kept untouched under
   `legacy` in the same file. It's skipped by
-  the grid/folder tree like any other dotfile, and moves/renames/deletes
-  (and Undo) of the source file bring it along automatically. Renaming or
+  the grid/folder list like any other dotfile, and the app's own moves
+  (into Entered or Inbox), deletes, and Undo bring it along automatically. Renaming or
   moving that PDF from outside the app (e.g. Windows Explorer) orphans the
   sidecar — reopen the review folder in place afterward rather than
   drag-copying it elsewhere, since dragging a folder in also leaves any
@@ -144,6 +144,12 @@ per platform automatically, so this can be run entirely from Windows.
   or added by hand with "Add row". Those live one per file in a hidden
   `.records` folder, so two people editing different rows on a shared
   OneDrive folder never collide.
+- Setting an application's entry date (in the preview pane, a Tracker cell,
+  or "Entered today" on a batch) moves its file into an `Entered` subfolder
+  (created if missing), so the folder tree shows at a glance what's been
+  fully processed. Clearing the date — or undoing it — moves the file back
+  to `Inbox`. A same-named file already there gets a " (1)" suffix rather
+  than being overwritten.
 - Summary: per plan, the running totals plus the old spreadsheet's monthly
   (for a chosen year) and weekly (last 10 weeks) tables, counted by
   Application Entry Date. "Export to Excel" (Tracker or Summary) saves a
@@ -163,8 +169,8 @@ per platform automatically, so this can be run entirely from Windows.
   it's easy to tell apart from a scanned application at a glance. Saving a
   changed mapping fills in any already-imported application missing one of
   those values, without overwriting anything already entered.
-- Deleting a file (with a confirmation prompt first), moving a file, editing
-  its tags/comments, or renaming/deleting a predefined tag in the tag manager
+- Deleting a file (with a confirmation prompt first), setting its entry
+  date (and the move that goes with it), editing its tags/comments, or renaming/deleting a predefined tag in the tag manager
   can all be undone with the "Undo" button in the top bar (or Ctrl+Z), one step
   at a time. A deleted file is only gone for good once the app is closed and
   reopened — until then it's held out of sight so Undo can bring it back.
@@ -178,8 +184,14 @@ per platform automatically, so this can be run entirely from Windows.
   it into the platform-specific `.ico`/`.icns` automatically since
   `package.json`'s `build.win`/`build.mac` don't override `icon`.
 - Only `.pdf`, `.jpg`, `.jpeg`, and `.png` files are shown.
-- "All files" browses the chosen folder and every subfolder recursively. The
-  sidebar lists the subfolder tree underneath it — click a subfolder to
-  narrow the grid down to it (and its own subfolders); click "All files"
-  again to clear the filter. Folders and files starting with a dot (e.g.
-  `.git`) are skipped.
+- "All files" browses the chosen folder and every subfolder recursively.
+  Underneath it the sidebar always lists `Inbox` and `Entered` (plus any
+  other top-level folder that holds files) — click one to narrow the grid
+  down to it; click "All files" again to clear the filter. Folders and files
+  starting with a dot (e.g. `.git`) are skipped.
+- Nothing stays loose at the top of the workspace: a file dragged into the
+  app goes to `Inbox`, and one dropped at the root from outside (a scanner,
+  Explorer, another computer's sync) is moved on the next scan — to `Inbox`,
+  or straight to `Entered` if it already has an entry date. This only
+  happens in a folder that already has an `Inbox` or `Entered`, so opening
+  some other folder by mistake never rearranges it.

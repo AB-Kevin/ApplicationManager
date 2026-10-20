@@ -95,8 +95,11 @@ async function readTrackerWorkbook(filePath) {
       // The old tracker had no checkbox: a row was "Complete" once its card
       // went out, and plenty of Complete rows never got a Card Sent Date.
       rec.cardSent = cardSentCell != null ? /^(yes|true|x|1)$/i.test(String(cardSentCell).trim()) || cardSentCell === true : /^complete$/i.test(status) || !!rec.cardSentDate;
-      rec.notes = String(get("notes") ?? "").trim();
       rec.meta = { source: "spreadsheet", importedFrom: path.basename(filePath) };
+      // No Notes field on a record any more (see normalizeRecord) -- an old
+      // spreadsheet's notes are kept out of sight with the import details.
+      const notes = String(get("notes") ?? "").trim();
+      if (notes) rec.meta.notes = notes;
       records.push(rec);
     }
     sheets.push({ plan, records });
@@ -147,7 +150,6 @@ function addMembersSheet(wb, plan, records) {
     { header: "Card Sent", key: "cardSent", width: 11 },
     { header: "Card Sent Date", key: "cardSentDate", width: 16, date: true },
     { header: "Status", key: "status", width: 16 },
-    { header: "Notes", key: "notes", width: 40 },
     { header: "File", key: "file", width: 40 },
   ];
   columns.forEach((c, i) => (ws.getColumn(i + 1).width = c.width));

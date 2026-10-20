@@ -638,37 +638,6 @@ function moveSidecarIfExists(srcAbsFile, destAbsFile) {
   }
 }
 
-// Moves a file into `destDir` (a relative subfolder path, or "" for the catalog
-// root). Refuses to clobber an existing file of the same name at the destination
-// rather than overwriting it silently.
-function moveOneFile(folder, relPath, destDir) {
-  const name = path.basename(relPath);
-  const newRelPath = destDir ? `${destDir}/${name}` : name;
-  const srcFull = path.join(folder, relPath);
-  const destFull = path.join(folder, newRelPath);
-  if (srcFull === destFull) return { path: relPath };
-  if (fs.existsSync(destFull)) {
-    return { error: `"${name}" already exists in that folder.` };
-  }
-  try {
-    fs.mkdirSync(path.dirname(destFull), { recursive: true });
-    fs.renameSync(srcFull, destFull);
-  } catch (e) {
-    // The file may be transiently locked (antivirus scan, an open preview, a
-    // sync client) — report it as a per-file failure instead of throwing.
-    // Letting this throw would reject the whole IPC call (fatal for a batch:
-    // it aborts every other file still queued behind it, and leaves the
-    // renderer's own post-move cleanup/refresh never running).
-    return { error: `Couldn't move "${name}": ${e.message}` };
-  }
-  moveSidecarIfExists(srcFull, destFull);
-  return { path: newRelPath };
-}
-
-ipcMain.handle("move-file", async (event, folder, relPath, destDir) => {
-  return moveOneFile(folder, relPath, destDir);
-});
-
 // ---- Importing files dragged in from the OS file explorer ----
 
 // Expands one dropped OS path into a flat list of { srcAbs, relDest } pairs
@@ -694,11 +663,10 @@ function expandDroppedPath(absPath, relDest) {
 }
 
 // Copies one external file into `destDir` under the catalog folder — a COPY,
-// not a move (moveOneFile's move-within-the-catalog semantics don't apply;
-// the source lives outside anything the app manages, and dropping a file
+// not a move (the source lives outside anything the app manages, and dropping a file
 // shouldn't remove it from wherever the user dragged it from). Rejects
 // anything that isn't a catalog-accepted extension up front, and refuses to
-// clobber an existing file at the destination, same policy as moveOneFile.
+// clobber an existing file at the destination.
 function importOneFile(folder, srcAbs, relDest, destDir) {
   const name = path.basename(relDest);
   const ext = path.extname(name).toLowerCase();
@@ -749,117 +717,6 @@ ipcMain.handle("import-files", async (event, folder, absPaths, destDir) => {
   return { imported, errors };
 });
 
-// Moves many files into `destDir` in one call — e.g. a "move every file with
-// this tag" bulk action. Each file is attempted independently, so one name
-// collision doesn't block the rest; per-file failures are reported back for
-// the renderer to surface instead of aborting the whole batch.
-// `moved` reports each file's before/after path (rather than just the after
-// path) so the renderer's Undo stack can move every successfully-moved file
-// back to exactly where it came from, without guessing at index alignment
-// against `relPaths` once some entries have dropped out to `errors`.
-ipcMain.handle("move-files-batch", async (event, folder, relPaths, destDir) => {
-  const moved = [];
-  const errors = [];
-  for (const relPath of relPaths) {
-    const result = moveOneFile(folder, relPath, destDir);
-    if (result.error) errors.push({ path: relPath, error: result.error });
-    else moved.push({ from: relPath, to: result.path });
-  }
-  return { moved, errors };
-});
-
-// Renames a file within its current folder to `newName`. Used both directly
-// (autorename) and to undo an autorename (renaming back to the original name).
-// Refuses to clobber an existing file at that name, same as moveOneFile.
-function renameOneFile(folder, relPath, newName) {
-  const dir = path.dirname(relPath);
-  const destDirRel = dir === "." ? "" : dir;
-  const newRelPath = destDirRel ? `${destDirRel}/${newName}` : newName;
-  const srcFull = path.join(folder, relPath);
-  const destFull = path.join(folder, newRelPath);
-  if (srcFull === destFull) return { path: relPath };
-  if (fs.existsSync(destFull)) {
-    return { error: `"${newName}" already exists in that folder.` };
-  }
-  try {
-    fs.renameSync(srcFull, destFull);
-  } catch (e) {
-    return { error: `Couldn't rename "${path.basename(relPath)}": ${e.message}` };
-  }
-  moveSidecarIfExists(srcFull, destFull);
-  return { path: newRelPath };
-}
-
-ipcMain.handle("rename-file", async (event, folder, relPath, newName) => {
-  return renameOneFile(folder, relPath, newName);
-});
-
-// Renames a file in place to a yyyyMMdd_HHmmss timestamp (preserving its
-// extension) — lets a name collision at a move destination be resolved
-// in-app instead of requiring a trip to file explorer to rename it by hand.
-// Falls back to a numeric suffix in the unlikely case two files land on the
-// same second.
-function autorenameOneFile(folder, relPath) {
-  const ext = path.extname(relPath);
-  const dir = path.dirname(relPath);
-  const destDirRel = dir === "." ? "" : dir;
-  const destDirFull = path.join(folder, destDirRel);
-
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-
-  let name = `${stamp}${ext}`;
-  let n = 1;
-  while (fs.existsSync(path.join(destDirFull, name))) {
-    name = `${stamp}_${n}${ext}`;
-    n++;
-  }
-
-  return renameOneFile(folder, relPath, name);
-}
-
-ipcMain.handle("autorename-file", async (event, folder, relPath) => {
-  return autorenameOneFile(folder, relPath);
-});
-
-// Autorenames many files in one action — e.g. a multi-select move that hit
-// collisions at the destination. All files share the same yyyyMMdd_HHmmss
-// stamp (they're being renamed in the same instant), so each gets a " (n)"
-// suffix — 1-indexed in selection order — to keep them from all colliding
-// with each other. Each file is attempted independently, mirroring
-// move-files-batch, so one locked/in-use file doesn't block the rest.
-function autorenameFilesBatch(folder, relPaths) {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-
-  const moved = [];
-  const errors = [];
-  relPaths.forEach((relPath, i) => {
-    const ext = path.extname(relPath);
-    const dir = path.dirname(relPath);
-    const destDirRel = dir === "." ? "" : dir;
-    const destDirFull = path.join(folder, destDirRel);
-
-    let name = `${stamp} (${i + 1})${ext}`;
-    let n = 1;
-    while (fs.existsSync(path.join(destDirFull, name))) {
-      name = `${stamp} (${i + 1})_${n}${ext}`;
-      n++;
-    }
-
-    const result = renameOneFile(folder, relPath, name);
-    if (result.error) errors.push({ path: relPath, error: result.error });
-    else moved.push({ from: relPath, to: result.path });
-  });
-  return { moved, errors };
-}
-
-ipcMain.handle("autorename-files-batch", async (event, folder, relPaths) => {
-  return autorenameFilesBatch(folder, relPaths);
-});
-
 // Windows/Chromium quirk: after the DOM subtree holding a native <select> is torn
 // down and rebuilt (as happens on every full re-render following a file move),
 // Chromium can leave that select's popup-menu tracking orphaned, and clicking any
@@ -876,6 +733,7 @@ ipcMain.handle("nudge-window-focus", async () => {
 });
 
 ipcMain.handle("list-files", async (event, folder) => {
+  fileLooseFiles(folder);
   const found = walkFiles(folder);
   const rotations = readRotations();
   return Promise.all(
@@ -947,8 +805,9 @@ function trashOneFile(folder, relPath) {
   try {
     moveFileSafe(full, trashPath);
   } catch (e) {
-    // Same reasoning as moveOneFile's catch: a transiently locked file becomes a
-    // per-file failure instead of throwing, so it doesn't take a whole batch down.
+    // The file may be transiently locked (antivirus scan, an open preview, a
+    // sync client) — report it as a per-file failure instead of throwing, so
+    // it doesn't take a whole batch down.
     return { error: `Couldn't delete "${path.basename(relPath)}": ${e.message}` };
   }
   moveSidecarIfExists(full, trashPath);
@@ -1135,12 +994,61 @@ function mergeRecordPatch(current, patch, editor) {
   return rec;
 }
 
+// Application files are filed by status: new ones land in Inbox (see
+// import-gf-entries), and setting one's entry date moves it into Entered, so
+// the folder tree alone shows what's been fully processed. Clearing the date
+// again (or undoing it) sends the file back to Inbox, and a file loose at the
+// root goes to whichever one fits (see fileLooseFiles). A same-named file
+// already at the destination gets a " (n)" suffix, same as an import does.
+const INBOX_DIRNAME = "Inbox";
+const ENTERED_DIRNAME = "Entered";
+
+function fileByEntryStatus(folder, relPath, rec) {
+  const inEntered = relPath.startsWith(`${ENTERED_DIRNAME}/`);
+  const atRoot = !relPath.includes("/");
+  let destDir = null;
+  if (rec.entryDate && !inEntered) destDir = ENTERED_DIRNAME;
+  else if (!rec.entryDate && (inEntered || atRoot)) destDir = INBOX_DIRNAME;
+  if (!destDir) return { path: relPath };
+  const ext = path.extname(relPath);
+  const base = path.basename(relPath, ext);
+  let name = `${base}${ext}`;
+  for (let n = 1; fs.existsSync(path.join(folder, destDir, name)); n++) name = `${base} (${n})${ext}`;
+  const srcFull = path.join(folder, relPath);
+  const destFull = path.join(folder, destDir, name);
+  try {
+    fs.mkdirSync(path.dirname(destFull), { recursive: true });
+    fs.renameSync(srcFull, destFull);
+  } catch (e) {
+    return { path: relPath, moveError: `Saved, but couldn't move "${path.basename(relPath)}" to ${destDir}: ${e.message}` };
+  }
+  moveSidecarIfExists(srcFull, destFull);
+  return { path: `${destDir}/${name}` };
+}
+
+// Nothing stays loose at the workspace root: a file dropped there (by a
+// scanner, from Explorer, or synced in from another computer) is filed on
+// the next scan. One still locked mid-copy just stays put until a later
+// scan. Only done in a folder that already has an Inbox or Entered, so
+// pointing "Choose folder" at the wrong place never rearranges it.
+function fileLooseFiles(folder) {
+  const isWorkspace = [INBOX_DIRNAME, ENTERED_DIRNAME].some((d) => fs.existsSync(path.join(folder, d)));
+  if (!isWorkspace) return;
+  for (const e of fs.readdirSync(folder, { withFileTypes: true })) {
+    if (e.name.startsWith(".") || !e.isFile() || !ACCEPTED_EXT.includes(path.extname(e.name).toLowerCase())) continue;
+    fileByEntryStatus(folder, e.name, normalizeRecord(readAppForm(path.join(folder, e.name))));
+  }
+}
+
 ipcMain.handle("patch-app-form", async (event, folder, relPath, patch, editor) => {
   const absFile = path.join(folder, relPath);
   if (!fs.existsSync(absFile)) throw new Error("This application's file was moved or deleted (possibly on another computer). Refresh to see where it went.");
   const rec = mergeRecordPatch(readAppForm(absFile), patch, editor);
   writeAppForm(absFile, rec);
-  return rec;
+  // Only an edit to the entry date itself refiles — any other field leaves
+  // the file wherever it is, even if someone has moved it by hand.
+  const filed = "entryDate" in patch ? fileByEntryStatus(folder, relPath, rec) : { path: relPath };
+  return { record: rec, ...filed };
 });
 
 // ---- Gravity Forms API import ----
@@ -1313,14 +1221,31 @@ ipcMain.handle("get-record-mapping", async (event, folder) => {
   return config ? recordMapping(config) : null;
 });
 
+// Where each imported entry's file is now, by entry id. The path recorded at
+// import time goes stale as soon as the file moves (into Entered, see
+// fileByEntryStatus, or by hand), so the files' own sidecars -- which carry
+// their gfEntryId wherever they go -- are checked too.
+function importedEntryPaths(folder, config) {
+  const found = {};
+  for (const [id, relPath] of Object.entries(config.importedEntries || {})) {
+    if (fs.existsSync(path.join(folder, relPath))) found[id] = relPath;
+  }
+  for (const { relPath } of walkFiles(folder)) {
+    const rec = readAppForm(path.join(folder, relPath));
+    const id = rec && rec.meta && rec.meta.gfEntryId;
+    if (id) found[String(id)] = relPath;
+  }
+  return found;
+}
+
 ipcMain.handle("list-gf-entries", async (event, folder) => {
   const config = readApiConfig(folder);
   if (!config || !config.formId) throw new Error("No API connection configured for this folder yet.");
   const { entries, totalCount } = await fetchAllGfEntries(config);
-  const imported = config.importedEntries || {};
   // An entry whose imported file has since been deleted is offered again --
   // that's how an application gets re-imported (e.g. to regenerate its PDF).
-  const stillImported = (id) => imported[id] && fs.existsSync(path.join(folder, imported[id]));
+  const imported = importedEntryPaths(folder, config);
+  const stillImported = (id) => !!imported[id];
   const mapping = recordMapping(config);
   const summarized = entries
     .filter((e) => !stillImported(String(e.id)))
@@ -1341,7 +1266,7 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
     fields = (await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}`)).fields || [];
   } catch {}
   const mapping = recordMapping(config);
-  const inboxDir = path.join(folder, "Inbox");
+  const inboxDir = path.join(folder, INBOX_DIRNAME);
   fs.mkdirSync(inboxDir, { recursive: true });
   const imported = [];
   const errors = [];
@@ -1388,7 +1313,7 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
 ipcMain.handle("apply-mapping-to-imported", async (event, folder) => {
   const config = readApiConfig(folder);
   if (!config || !config.formId) return { updated: 0 };
-  const importedEntries = config.importedEntries || {};
+  const importedEntries = importedEntryPaths(folder, config);
   if (Object.keys(importedEntries).length === 0) return { updated: 0 };
   const { entries } = await fetchAllGfEntries(config);
   const byId = new Map(entries.map((e) => [String(e.id), e]));

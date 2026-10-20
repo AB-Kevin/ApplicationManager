@@ -159,7 +159,6 @@ const state = {
   activeTags: new Set(), // tag names currently filtering the grid (AND — a file matches only if it has all of them)
   activeFolder: null, // relative path of the subfolder filter, or null for "All files" (recursive)
   untaggedOnly: false, // true to show only files with zero tags
-  looseOnly: false, // true to show only files directly in the catalog root (dir === "") — mutually exclusive with activeFolder, same as untaggedOnly is with activeTags
   sortBy: "name", // "name" | "date" | "tag" | "dir" | "size"
   sortDir: "asc", // "asc" | "desc" — see SORT_DEFAULT_DIR/setSortBy above
   viewMode: loadViewMode(), // "grid" | "list" — see loadViewMode/saveViewMode above
@@ -402,45 +401,24 @@ function getAllTags() {
   return Object.entries(counts).sort((a, b) => b[1] - a[1]);
 }
 
-// Builds a nested folder tree from each file's `dir` (its parent folder's relative
-// path, "" at the root). Intermediate folders that hold no files directly but do
-// hold subfolders with files still get a node, so the tree stays connected.
-function buildFolderTree(files) {
-  const root = { name: "", path: "", children: new Map(), count: 0, total: 0 };
-  files.forEach((f) => {
-    if (!f.dir) {
-      root.count++;
-      return;
-    }
-    let node = root;
-    let acc = "";
-    for (const part of f.dir.split("/")) {
-      acc = acc ? `${acc}/${part}` : part;
-      if (!node.children.has(part)) {
-        node.children.set(part, { name: part, path: acc, children: new Map(), count: 0, total: 0 });
-      }
-      node = node.children.get(part);
-    }
-    node.count++;
-  });
-  (function computeTotals(node) {
-    node.total = node.count + [...node.children.values()].reduce((sum, c) => sum + computeTotals(c), 0);
-    return node.total;
-  })(root);
-  return root;
-}
+// The rail's folder list. Files are filed by status (see main.js's
+// fileByEntryStatus and fileLooseFiles), so Inbox and Entered are always
+// listed, even while empty, and nothing sits loose at the root. Any other
+// top-level folder that holds files (made by hand outside the app) is listed
+// after them so its files stay reachable; counts include subfolders.
+const STATUS_FOLDERS = ["Inbox", "Entered"];
 
-function renderFolderTree(node, depth) {
-  return [...node.children.values()]
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
-    .map(
-      (child) => `
-      <div class="bm-nav-item ${state.activeFolder === child.path ? "active" : ""}" data-folder="${child.path.replace(/"/g, "&quot;")}" style="padding-left:${10 + depth * 14}px">
-        <span class="bm-nav-name">${ICONS.folder}<span class="bm-nav-name-text">${child.name}</span></span><span class="bm-nav-count">${child.total}</span>
-      </div>
-      ${renderFolderTree(child, depth + 1)}`
-    )
-    .join("");
+function railFolders(files) {
+  const counts = new Map(STATUS_FOLDERS.map((name) => [name, 0]));
+  files.forEach((f) => {
+    if (!f.dir) return;
+    const top = f.dir.split("/")[0];
+    counts.set(top, (counts.get(top) || 0) + 1);
+  });
+  const others = [...counts.keys()]
+    .filter((name) => !STATUS_FOLDERS.includes(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  return [...STATUS_FOLDERS, ...others].map((name) => ({ name, count: counts.get(name) }));
 }
 
 function getTagColor(name) {
@@ -562,7 +540,6 @@ function getFiltered() {
     .filter((f) => !state.untaggedOnly || f.tags.length === 0)
     .filter((f) => [...state.activeTags].every((t) => f.tags.includes(t)))
     .filter((f) => !state.activeFolder || f.dir === state.activeFolder || f.dir.startsWith(state.activeFolder + "/"))
-    .filter((f) => !state.looseOnly || f.dir === "")
     .filter((f) => recordMatchesPlan(f.appForm));
   return sortFiles(filtered);
 }
@@ -661,7 +638,6 @@ async function openFolder(folder, isStartup = false) {
   state.activeTags = new Set();
   state.activeFolder = null;
   state.untaggedOnly = false;
-  state.looseOnly = false;
   state.search = "";
   state.activePlan = null;
   state.trackerSearch = "";
@@ -775,13 +751,50 @@ function rowTarget(row) {
 // holds right now (see main.js's mergeRecordPatch) — the folder is shared,
 // and someone else may have changed another field of the same application
 // since this window loaded it.
+//
+// Setting or clearing a file's entry date also moves the file, into Entered
+// or back to Inbox (see main.js's fileByEntryStatus). `target.file` is
+// updated in place to follow it, so an undo holding this same target — see
+// setRecordFields — moves it back from wherever it went.
 function patchTarget(target, patch) {
   const editor = commentSignerName() || "Unknown";
+  if (!target.file) return trackWrite(window.api.patchRecord(state.folder, target.id, patch, editor));
   return trackWrite(
-    target.file
-      ? window.api.patchAppForm(state.folder, target.file, patch, editor)
-      : window.api.patchRecord(state.folder, target.id, patch, editor)
+    window.api.patchAppForm(state.folder, target.file, patch, editor).then(({ record, path, moveError }) => {
+      if (path !== target.file) {
+        followMovedFile(target.file, path);
+        target.file = path;
+      }
+      if (moveError) alert(moveError);
+      return record;
+    })
   );
+}
+
+// Points everything that tracks a file by path at its new one after a move
+// into Entered or Inbox — the selection, review
+// mode's cursor, and the file object itself (a row built from it may still
+// have a debounced text save pending) — then rescans so the grid and folder
+// tree catch up.
+function followMovedFile(from, to) {
+  const swap = (p) => (p === from ? to : p);
+  if (state.selected.has(from)) {
+    state.selected.delete(from);
+    state.selected.add(to);
+  }
+  state.selectAnchor = swap(state.selectAnchor);
+  state.navCursor = swap(state.navCursor);
+  state.reviewCursor = swap(state.reviewCursor);
+  const file = state.files.find((f) => f.path === from);
+  if (file) file.path = to;
+  scheduleMoveRefresh();
+}
+
+// A bulk "Entered today" moves every file at once; one rescan covers the lot.
+let moveRefreshTimer = null;
+function scheduleMoveRefresh() {
+  clearTimeout(moveRefreshTimer);
+  moveRefreshTimer = setTimeout(() => refreshFiles(), 100);
 }
 
 // A save that still fails after main.js's own retries (a file locked for
@@ -795,11 +808,12 @@ function reportSaveError(target, e) {
 
 // Takes the merged record back from disk, picking up anyone else's edits to
 // the row's other fields — except a field with a keystroke save still
-// pending, whose newer value is the one on screen.
-function patchRow(row, patch) {
-  const target = rowTarget(row);
+// pending, whose newer value is the one on screen. `target` defaults to a
+// fresh one; setRecordFields passes the one its undo snapshot holds.
+function patchRow(row, patch, target = rowTarget(row)) {
   return patchTarget(target, patch).then(
     (merged) => {
+      if (row.file) row.file.path = target.file;
       if (!merged) return;
       for (const [key, value] of Object.entries(merged)) {
         if (!recordSaveDebounce[`${row.key}|${key}`]) row.record[key] = value;
@@ -824,7 +838,7 @@ function restoreSnapshots(snaps) {
 function setRecordFields(row, patch, label = "Edit application") {
   const snap = snapshotFields(row, Object.keys(patch));
   Object.assign(row.record, patch);
-  patchRow(row, patch);
+  patchRow(row, patch, snap.target);
   pushUndo(label, () => restoreSnapshots([snap]));
 }
 
@@ -840,9 +854,9 @@ function setRecordFieldsForFiles(files, patch, label) {
   if (files.length === 0) return;
   const rows = files.map(rowForFile);
   const snaps = rows.map((row) => snapshotFields(row, Object.keys(patch)));
-  rows.forEach((row) => {
+  rows.forEach((row, i) => {
     Object.assign(row.record, patch);
-    patchRow(row, patch);
+    patchRow(row, patch, snaps[i].target);
   });
   pushUndo(label, () => restoreSnapshots(snaps));
 }
@@ -875,7 +889,7 @@ function flushPendingRecordSaves() {
   Object.keys(recordSaveDebounce).forEach((key) => flushRowSave(key));
 }
 
-const RECORD_FIELD_LABELS = { name: "name", memberId: "member ID", notes: "notes" };
+const RECORD_FIELD_LABELS = { name: "name", memberId: "member ID" };
 
 function wireRecordTextInput(input, row, field) {
   let before = null;
@@ -983,154 +997,6 @@ async function openFile(relPath) {
   if (error) alert(`Couldn't open "${relPath}":\n${error}`);
 }
 
-// Moves every selected file to `destDir`. A single file moves immediately, no
-// confirmation, same as always. More than one asks for confirmation first
-// (a batch move is harder to eyeball before it happens) and, since the
-// preview pane is now a persistent surface rather than a transient action
-// bar, keeps the moved files selected afterward at their new paths instead of
-// clearing the selection.
-async function moveSelected(destDir) {
-  const files = getSelectedFiles();
-  if (files.length === 0) return;
-
-  if (files.length === 1) {
-    const file = files[0];
-    if (destDir === file.dir) return;
-    const prevDir = file.dir;
-    const name = file.name;
-    try {
-      const result = await window.api.moveFile(state.folder, file.path, destDir);
-      if (result && result.error) {
-        alert(result.error);
-        return;
-      }
-      state.selected = new Set([result.path]);
-      state.selectAnchor = result.path;
-      const movedTo = result.path;
-      pushUndo(`Move "${name}"`, async () => {
-        const r = await window.api.moveFile(state.folder, movedTo, prevDir);
-        if (r && r.error) throw new Error(r.error);
-      });
-    } catch (e) {
-      // Shouldn't happen — the main-process move no longer throws — but resync
-      // with disk regardless rather than leaving stale state on an unexpected failure.
-      alert(`Couldn't move "${file.name}": ${e.message || e}`);
-    } finally {
-      await refreshFiles();
-    }
-    return;
-  }
-
-  const paths = files.map((f) => f.path);
-  const destLabel = destDir || "Root folder";
-  if (!confirm(`Move ${paths.length} files to "${destLabel}"?`)) return;
-  let errors = [];
-  let moved = [];
-  try {
-    const result = await window.api.moveFiles(state.folder, paths, destDir);
-    moved = (result && result.moved) || [];
-    errors = (result && result.errors) || [];
-  } catch (e) {
-    // Shouldn't happen — moveOneFile no longer throws — but if the IPC call
-    // itself fails outright, still fall through to resync below rather than
-    // leaving the UI stuck showing stale state.
-    errors = paths.map((p) => ({ path: p, error: e.message || String(e) }));
-  } finally {
-    state.selected = new Set([...moved.map((m) => m.to), ...errors.map((e) => e.path)]);
-    await refreshFiles();
-  }
-  if (moved.length > 0) {
-    pushUndo(`Move ${moved.length} files`, () => undoBulkMove(moved));
-  }
-  if (errors.length > 0) {
-    alert(
-      `Moved ${paths.length - errors.length} of ${paths.length} file(s). ${errors.length} failed:\n\n` +
-        errors.map((e) => `• ${e.path}: ${e.error}`).join("\n")
-    );
-  }
-}
-
-// Renames every selected file in place to a yyyyMMdd_HHmmss timestamp,
-// preserving each one's extension — a one-click way to clear an "already
-// exists in that folder" collision at the move destination without a trip to
-// file explorer. With more than one file selected, every name gets a " (n)"
-// suffix (1-indexed) so the batch doesn't collide with itself.
-async function autorenameSelected() {
-  const files = getSelectedFiles();
-  if (files.length === 0 || !state.folder) return;
-
-  if (files.length === 1) {
-    const file = files[0];
-    const prevName = file.name;
-    try {
-      const result = await window.api.autorenameFile(state.folder, file.path);
-      if (result && result.error) {
-        alert(result.error);
-        return;
-      }
-      state.selected = new Set([result.path]);
-      state.selectAnchor = result.path;
-      const newPath = result.path;
-      pushUndo(`Autorename "${prevName}"`, async () => {
-        const r = await window.api.renameFile(state.folder, newPath, prevName);
-        if (r && r.error) throw new Error(r.error);
-      });
-    } catch (e) {
-      alert(`Couldn't rename "${prevName}": ${e.message || e}`);
-    } finally {
-      await refreshFiles();
-    }
-    return;
-  }
-
-  const paths = files.map((f) => f.path);
-  const prevNames = new Map(files.map((f) => [f.path, f.name]));
-  let moved = [];
-  let errors = [];
-  try {
-    const result = await window.api.autorenameFiles(state.folder, paths);
-    moved = (result && result.moved) || [];
-    errors = (result && result.errors) || [];
-  } catch (e) {
-    errors = paths.map((p) => ({ path: p, error: e.message || String(e) }));
-  } finally {
-    state.selected = new Set([...moved.map((m) => m.to), ...errors.map((e) => e.path)]);
-    await refreshFiles();
-  }
-  if (moved.length > 0) {
-    pushUndo(`Autorename ${moved.length} files`, async () => {
-      const errs = [];
-      for (const { from, to } of moved) {
-        const r = await window.api.renameFile(state.folder, to, prevNames.get(from));
-        if (r && r.error) errs.push(`${to}: ${r.error}`);
-      }
-      if (errs.length > 0) throw new Error(`Some files couldn't be renamed back:\n${errs.join("\n")}`);
-    });
-  }
-  if (errors.length > 0) {
-    alert(
-      `Renamed ${moved.length} of ${paths.length} file(s). ${errors.length} failed:\n\n` +
-        errors.map((e) => `• ${e.path}: ${e.error}`).join("\n")
-    );
-  }
-}
-
-// Moves every file in `moved` (each an { from, to } pair from move-files-batch)
-// back to the subfolder its `from` path lived in. Collisions since the original
-// move (a same-named file reappearing at the old spot) are reported together
-// rather than aborting the rest of the batch, mirroring moveSelected itself.
-async function undoBulkMove(moved) {
-  const errors = [];
-  for (const { from, to } of moved) {
-    const destDir = from.includes("/") ? from.slice(0, from.lastIndexOf("/")) : "";
-    const result = await window.api.moveFile(state.folder, to, destDir);
-    if (result && result.error) errors.push(`${to}: ${result.error}`);
-  }
-  if (errors.length > 0) {
-    throw new Error(`Some files couldn't be moved back:\n${errors.join("\n")}`);
-  }
-}
-
 // Deletes every selected file in one action. Each file is trashed
 // independently, so one locked/in-use file doesn't block the rest, and Undo
 // brings the whole batch back as one step.
@@ -1166,7 +1032,7 @@ async function deleteSelected() {
 // Restores every file in `deleted` (each a { path, trashPath } pair from
 // delete-files-batch) back to where it was. Collisions since the delete (a
 // same-named file having reappeared at the old spot) are reported together
-// rather than aborting the rest of the batch, mirroring undoBulkMove.
+// rather than aborting the rest of the batch.
 async function undoBulkDelete(deleted) {
   const errors = [];
   for (const { path: relPath, trashPath } of deleted) {
@@ -1182,16 +1048,16 @@ async function undoBulkDelete(deleted) {
 
 // `absPaths` are the dropped items' resolved absolute OS paths (see the
 // drop handler in renderGridInto, which resolves each File via
-// window.api.getPathForFile before calling this). Imports into whatever
-// subfolder is currently active (root if "All files"/no folder filter) —
-// mirrors where the file grid drops you're currently looking at, the same
-// destination moveSelected would use. Copies rather than moves (see
+// window.api.getPathForFile before calling this). Always imports into Inbox,
+// whichever folder is being viewed — a new file hasn't been entered yet, and
+// setting its entry date is what moves it on to Entered (see main.js's
+// fileByEntryStatus). Copies rather than moves (see
 // importOneFile in main.js), so the newly-added files land selected and
 // undoing sends them to trash — deleteSelected's own undo path, run
 // forward instead of back.
 async function importDroppedFiles(absPaths) {
   if (!state.folder || absPaths.length === 0) return;
-  const destDir = state.activeFolder || "";
+  const destDir = "Inbox";
   let imported = [];
   let errors = [];
   try {
@@ -1708,7 +1574,7 @@ function reviewStep(dir) {
 // first tag — review is done with it, so it steps on to whatever now sits at
 // about the same spot in the list, same as if Next had been clicked.
 // Centralized here (rather than threaded through addTag/removeTag/
-// moveSelected/deleteSelected/refreshFiles) since render() already runs
+// deleteSelected/refreshFiles) since render() already runs
 // after every one of those.
 function maybeAdvanceReview() {
   if (!state.reviewMode) return;
@@ -1815,7 +1681,7 @@ function updateReviewInPlace() {
 // about to tear down and rebuild that element's subtree can hand focus back to
 // its replacement afterward — see restoreFocus. Without this, a field's own
 // change/input handler re-rendering synchronously (e.g. picking a tag,
-// changing the Location select) detaches the focused element mid-edit, and a
+// changing the plan select) detaches the focused element mid-edit, and a
 // detached element's focus falls back to <body>; the very next Tab then starts
 // over from the top of the page instead of continuing to the next field.
 function captureFocus() {
@@ -2168,9 +2034,7 @@ function railPlanCounts() {
 
 function renderRail() {
   const tags = getAllTags();
-  const folderTree = state.folder ? buildFolderTree(state.files) : null;
   const untaggedCount = state.files.filter((f) => f.tags.length === 0).length;
-  const looseCount = state.files.filter((f) => f.dir === "").length;
   const planCounts = railPlanCounts();
   const rail = el(`
     <aside class="bm-rail">
@@ -2217,19 +2081,21 @@ function renderRail() {
           </div>
         </div>
         <div class="bm-rail-label">Folders</div>
-        <div class="bm-nav-item ${state.activeTags.size === 0 && !state.activeFolder && !state.untaggedOnly && !state.looseOnly ? "active" : ""}" id="nav-all">
-          <span class="bm-nav-name">${ICONS.folder}<span class="bm-nav-name-text">All files</span></span>
-          <span class="bm-nav-count">${state.files.length}</span>
+        <div class="bm-folder-nav-list">
+          <div class="bm-nav-item ${state.activeTags.size === 0 && !state.activeFolder && !state.untaggedOnly ? "active" : ""}" id="nav-all">
+            <span class="bm-nav-name">${ICONS.folder}<span class="bm-nav-name-text">All files</span></span>
+            <span class="bm-nav-count">${state.files.length}</span>
+          </div>
+          ${railFolders(state.files)
+            .map(
+              (f) => `
+          <div class="bm-nav-item ${state.activeFolder === f.name ? "active" : ""}" data-folder="${escapeAttr(f.name)}">
+            <span class="bm-nav-name">${ICONS.folder}<span class="bm-nav-name-text">${escapeHtml(f.name)}</span></span>
+            <span class="bm-nav-count">${f.count}</span>
+          </div>`
+            )
+            .join("")}
         </div>
-        <div class="bm-nav-item dim ${state.looseOnly ? "active" : ""}" id="nav-loose">
-          <span class="bm-nav-name"><span class="bm-nav-name-text">Loose files</span></span>
-          <span class="bm-nav-count">${looseCount}</span>
-        </div>
-        ${
-          folderTree.children.size > 0
-            ? `<div class="bm-folder-nav-list" id="folder-nav-list">${renderFolderTree(folderTree, 0)}</div>`
-            : ""
-        }
         <div class="bm-rail-label-row">
           <div class="bm-rail-label">Tags</div>
           <button class="bm-rail-link" id="manage-tags-btn" title="Manage predefined tags">Manage</button>
@@ -2294,13 +2160,7 @@ function renderRail() {
   const apiSettingsBtn = rail.querySelector("#api-settings-btn");
   if (apiSettingsBtn) apiSettingsBtn.addEventListener("click", openApiSetupModal);
   const navAll = rail.querySelector("#nav-all");
-  if (navAll) navAll.addEventListener("click", () => { state.activeTags = new Set(); state.activeFolder = null; state.untaggedOnly = false; state.looseOnly = false; render(); });
-  const navLoose = rail.querySelector("#nav-loose");
-  if (navLoose) navLoose.addEventListener("click", () => {
-    state.looseOnly = !state.looseOnly;
-    if (state.looseOnly) state.activeFolder = null; // mutually exclusive with browsing into a specific folder — same relationship activeFolder already has with untaggedOnly's sibling, activeTags
-    render();
-  });
+  if (navAll) navAll.addEventListener("click", () => { state.activeTags = new Set(); state.activeFolder = null; state.untaggedOnly = false; render(); });
   const navUntagged = rail.querySelector("#nav-untagged");
   if (navUntagged) navUntagged.addEventListener("click", () => {
     state.untaggedOnly = !state.untaggedOnly;
@@ -2311,7 +2171,6 @@ function renderRail() {
     elm.addEventListener("click", () => {
       const p = elm.dataset.folder;
       state.activeFolder = state.activeFolder === p ? null : p;
-      if (state.activeFolder) state.looseOnly = false;
       render();
     });
   });
@@ -2407,11 +2266,6 @@ function renderFilesMain() {
             : ""
         }
         ${
-          state.looseOnly
-            ? `<div class="bm-active-filter">${ICONS.folder} Loose files <button id="clear-loose">${ICONS.x}</button></div>`
-            : ""
-        }
-        ${
           state.untaggedOnly
             ? `<div class="bm-active-filter">${ICONS.tag} No tags <button id="clear-untagged">${ICONS.x}</button></div>`
             : ""
@@ -2461,8 +2315,6 @@ function renderFilesMain() {
   main.querySelector("#undo-btn").addEventListener("click", performUndo);
   const clearFolderBtn = main.querySelector("#clear-folder");
   if (clearFolderBtn) clearFolderBtn.addEventListener("click", () => { state.activeFolder = null; render(); });
-  const clearLooseBtn = main.querySelector("#clear-loose");
-  if (clearLooseBtn) clearLooseBtn.addEventListener("click", () => { state.looseOnly = false; render(); });
   const clearUntaggedBtn = main.querySelector("#clear-untagged");
   if (clearUntaggedBtn) clearUntaggedBtn.addEventListener("click", () => { state.untaggedOnly = false; render(); });
   main.querySelectorAll(".bm-clear-tag-btn").forEach((btn) => {
@@ -2488,7 +2340,6 @@ const TRACKER_COLUMNS = [
   { key: "startDate", label: "Start date", defaultDir: "desc" },
   { key: "cardSent", label: "Card sent" },
   { key: "status", label: "Status" },
-  { key: "notes", label: "Notes" },
   { key: "file", label: "File" },
 ];
 
@@ -2506,7 +2357,7 @@ function trackerFilteredRows() {
     if (state.trackerStatus !== "all" && recordStatus(row.record) !== state.trackerStatus) return false;
     if (!q) return true;
     const r = row.record;
-    return [r.name, r.memberId, r.notes, row.file && row.file.name].some((s) => s && String(s).toLowerCase().includes(q));
+    return [r.name, r.memberId, row.file && row.file.name].some((s) => s && String(s).toLowerCase().includes(q));
   });
   return sortTrackerRows(rows);
 }
@@ -2573,7 +2424,6 @@ function renderTrackerRowHtml(row, showPlanCol) {
       <td><input class="bm-cell-input bm-cell-date${r.startDate ? "" : " is-empty"}" type="date" id="${id("startDate")}" data-cell="startDate" data-kind="date" value="${escapeAttr(r.startDate)}" /></td>
       <td class="bm-cell-center"><input type="checkbox" class="bm-cell-check" id="${id("cardSent")}" data-cell="cardSent" ${r.cardSent ? "checked" : ""} title="${r.cardSent && r.cardSentDate ? `Sent ${escapeAttr(formatDisplayDate(r.cardSentDate))}` : "Member card sent"}" /></td>
       <td><span class="bm-status bm-status--${status}">${statusLabel(status)}</span></td>
-      <td><input class="bm-cell-input" id="${id("notes")}" data-cell="notes" data-kind="text" value="${escapeAttr(r.notes)}" /></td>
       <td class="bm-cell-file">
         ${
           row.file
@@ -2604,7 +2454,7 @@ function renderTrackerMain() {
           <label class="bm-field-label" for="tracker-search">Search</label>
           <div class="bm-search-input-wrap">
             ${ICONS.search}
-            <input class="bm-input" id="tracker-search" placeholder="Name, member ID, notes, or file…" value="${escapeAttr(state.trackerSearch)}" />
+            <input class="bm-input" id="tracker-search" placeholder="Name, member ID, or file…" value="${escapeAttr(state.trackerSearch)}" />
           </div>
         </div>
         <div class="bm-field">
@@ -2712,7 +2562,6 @@ function reviewFileFromTracker(path) {
   state.activeTags = new Set();
   state.untaggedOnly = false;
   state.activeFolder = null;
-  state.looseOnly = false;
   state.selected = new Set([path]);
   state.selectAnchor = path;
   state.navCursor = path;
@@ -2783,7 +2632,6 @@ async function exportTracker() {
         startDate: r.startDate,
         cardSent: r.cardSent,
         cardSentDate: r.cardSentDate,
-        notes: r.notes,
         file: file ? file.path : "",
       })),
   }));
@@ -3278,7 +3126,7 @@ function wireFileItem(card, f, filtered) {
 // The preview pane is now a permanent fixture of the layout (see render()),
 // showing one of three things depending on the current selection: nothing
 // selected, exactly one file (the original single-file editor), or many files
-// (mini thumbnails + batch-aware move/tag/autorename/comment controls).
+// (mini thumbnails + batch-aware application/tag/comment controls).
 // Plain-language readout of whatever's currently narrowing getFiltered() —
 // same underlying pieces as the toolbar's own "active filters" chips (see
 // renderMain), just joined into one line for review mode's heading instead of
@@ -3287,7 +3135,6 @@ function wireFileItem(card, f, filtered) {
 function reviewFilterSummary() {
   const parts = [];
   if (state.activeFolder) parts.push(state.activeFolder);
-  if (state.looseOnly) parts.push("Loose files");
   if (state.untaggedOnly) parts.push("No tags");
   parts.push(...[...state.activeTags]);
   if (state.search) parts.push(`"${state.search}"`);
@@ -3383,9 +3230,6 @@ function renderPreviewEmpty() {
   const totalSize = filesInFolder.reduce((sum, f) => sum + f.size, 0);
   const taggedCount = filesInFolder.filter((f) => f.tags.length > 0).length;
   const untaggedCount = filesInFolder.filter((f) => f.tags.length === 0).length;
-  // Direct children of the selected folder only — not sorted into any of its
-  // subfolders. The complement to filesInFolder above, which is recursive.
-  const looseCount = filesInFolder.filter((f) => f.dir === (state.activeFolder || "")).length;
   const recent = [...undoStack].reverse().slice(0, 8);
 
   const panel = el(`
@@ -3399,7 +3243,6 @@ function renderPreviewEmpty() {
           <div class="bm-section-label">This folder</div>
           <div class="bm-stat-list">
             <div class="bm-stat-row"><span>Files</span><span class="bm-stat-value">${filesInFolder.length}</span></div>
-            <div class="bm-stat-row"><span>Loose files</span><span class="bm-stat-value">${looseCount}</span></div>
             <div class="bm-stat-row"><span>Folders</span><span class="bm-stat-value">${foldersInFolder.length}</span></div>
             <div class="bm-stat-row"><span>Total size</span><span class="bm-stat-value">${formatSize(totalSize)}</span></div>
             <div class="bm-stat-row"><span>Tagged</span><span class="bm-stat-value">${taggedCount}</span></div>
@@ -3437,45 +3280,6 @@ function renderPreviewEmpty() {
     });
   });
   return panel;
-}
-
-// The Location field (move-destination select + Autorename button) is shared
-// between the single- and multi-file preview, since both are driven by the
-// same moveSelected()/autorenameSelected() functions — only the label and the
-// select's currently-highlighted option differ.
-function renderLocationField(file) {
-  if (state.allFolders.length === 0) return "";
-  return `
-    <div>
-      <div class="bm-field">
-        <label class="bm-field-label" for="move-select">${file ? "Location" : "Move selection to"}</label>
-        <div class="bm-field-row">
-          <select class="bm-select" id="move-select" title="Move the selected file(s) to a different subfolder">
-            ${file ? "" : `<option value="__placeholder__" selected disabled>Choose a folder…</option>`}
-            <option value="" ${file && file.dir === "" ? "selected" : ""}>Root folder</option>
-            ${state.allFolders
-              .map(
-                (f) =>
-                  `<option value="${f.replace(/"/g, "&quot;")}" ${file && file.dir === f ? "selected" : ""}>${f}</option>`
-              )
-              .join("")}
-          </select>
-          <button class="bm-btn bm-btn-secondary bm-btn-sm" id="autorename-btn" title="Rename to the current date and time, to clear a name collision at the destination">${ICONS.pencil} Autorename</button>
-        </div>
-      </div>
-    </div>`;
-}
-
-function wireLocationField(panel) {
-  const moveSelect = panel.querySelector("#move-select");
-  if (moveSelect) {
-    moveSelect.addEventListener("change", (e) => {
-      if (e.target.value === "__placeholder__") return;
-      moveSelected(e.target.value);
-    });
-  }
-  const autorenameBtn = panel.querySelector("#autorename-btn");
-  if (autorenameBtn) autorenameBtn.addEventListener("click", autorenameSelected);
 }
 
 // Builds the actual <embed>/<img> for a file — shared by the single-file
@@ -3548,12 +3352,11 @@ async function rotateFile(file) {
   }
 }
 
-// The Location/Tags/Comments editor — the single-file preview pane's
+// The Tags/Comments editor — the single-file preview pane's
 // second section, under the Application fields (see application-form.js's
 // renderApplicationFieldsHtml).
 function renderTagsCommentsPaneHtml(file) {
   return `
-    ${renderLocationField(file)}
     <div>
       <div class="bm-section-label">Tags</div>
       <div class="bm-tag-editor" id="tag-editor">
@@ -3609,7 +3412,6 @@ ${escapeHtml(c)}</textarea>
 }
 
 function wireTagsCommentsPane(panel) {
-  wireLocationField(panel);
   const tagSelect = panel.querySelector("#tag-select");
   if (tagSelect) {
     tagSelect.addEventListener("change", (e) => {
@@ -3768,7 +3570,6 @@ function renderPreviewMulti(files) {
       </div>
       <div class="bm-preview-scroll">
         ${renderBulkApplicationHtml(files)}
-        ${renderLocationField(null)}
         <div>
           <div class="bm-section-label">Tags shared by all ${files.length}</div>
           <div class="bm-tag-editor" id="tag-editor">
@@ -3822,7 +3623,6 @@ function renderPreviewMulti(files) {
     });
   });
   wireBulkApplication(panel, files);
-  wireLocationField(panel);
   const tagSelect = panel.querySelector("#tag-select");
   if (tagSelect) {
     tagSelect.addEventListener("change", (e) => {
