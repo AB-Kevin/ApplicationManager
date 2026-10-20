@@ -6,18 +6,9 @@ const { pathToFileURL } = require("url");
 const { execFileSync, spawn } = require("child_process");
 const { exiftool } = require("exiftool-vendored");
 const { autoUpdater } = require("electron-updater");
-const { PDFDocument, degrees } = require("pdf-lib");
-const {
-  makeBlankAppForm,
-  makeBlankHouseholdMember,
-  DEFAULT_REQUIRED_FIELDS,
-  DEPENDENTS_TARGET,
-  mergeDependentRows,
-  enrichFieldMapping,
-  NO_HISTORY_FLAG_KEYS,
-  interpretNoFlagAnswer,
-} = require("./renderer/application-form.js");
-const { generateApplicationPdf, formatAnswerText } = require("./application-pdf.js");
+const { DEFAULT_PLANS, makeBlankRecord, normalizeRecord, normalizeDateToIso, todayIso } = require("./renderer/application-form.js");
+const { generateApplicationPdf } = require("./application-pdf.js");
+const { readTrackerWorkbook, writeTrackerWorkbook } = require("./tracker-xlsx.js");
 
 const ACCEPTED_EXT = [".pdf", ".jpg", ".jpeg", ".png"];
 
@@ -530,19 +521,6 @@ ipcMain.handle("set-theme", (event, theme) => {
   return next;
 });
 
-// Per-device destination for the Autoexport button (see autoexportOneFile
-// below) — an absolute folder outside the catalog, chosen once via the native
-// folder picker the first time Autoexport is used and remembered from then
-// on. Also changeable any time from the Options dialog. Falls back to the
-// old "autosaveFolder" settings key so upgrading doesn't silently forget a
-// folder someone already picked before the feature was renamed.
-ipcMain.handle("get-autoexport-folder", () => {
-  const settings = readSettings();
-  return settings.autoexportFolder || settings.autosaveFolder || null;
-});
-
-ipcMain.handle("set-autoexport-folder", (event, folder) => writeSettings({ autoexportFolder: folder }));
-
 // Per-file rotation, for review mode's "fix a sideways/upside-down scan"
 // button (see the renderer's rotateFile). This is a view-only fix — there's
 // no safe, dependency-free way to physically re-encode a rotated JPG/PNG or
@@ -882,158 +860,6 @@ ipcMain.handle("autorename-files-batch", async (event, folder, relPaths) => {
   return autorenameFilesBatch(folder, relPaths);
 });
 
-// Maps the EXIF Orientation tag (1-8) to the clockwise degrees a viewer must
-// rotate the raw, as-stored pixel data by to display it upright — the exact
-// same "clockwise degrees to rotate for display" meaning as a PDF page's own
-// /Rotate entry (see PDFPage.setRotation below), so the values carry over
-// directly. A phone photo shot in portrait is very often stored "sideways"
-// at the sensor level (Orientation 6 or 8) with this tag recording the fix;
-// values 2/4/5/7 additionally mirror the image, which a plain page rotation
-// can't express — real cameras essentially never produce those, so they're
-// handled here as their rotation component only, dropping the mirror.
-const EXIF_ORIENTATION_TO_ROTATION = { 1: 0, 2: 0, 3: 180, 4: 180, 5: 270, 6: 90, 7: 90, 8: 270 };
-
-// JPEG's raw pixel data (what pdf-lib's embedJpg reads) is oriented however
-// the camera sensor captured it — completely ignoring the EXIF Orientation
-// tag that photo viewers (including this app's own <img>-based previews,
-// which Chromium auto-rotates per EXIF by default) use to display it upright.
-// Without correcting for that, an autoexported portrait photo stored sideways
-// at the sensor level would land in the PDF still sideways. PNG carries no
-// such tag in practice, so this is JPEG-only.
-async function readJpegRotation(srcFull) {
-  try {
-    const tags = await exiftool.read(srcFull);
-    return EXIF_ORIENTATION_TO_ROTATION[tags.Orientation] || 0;
-  } catch {
-    return 0; // no/unreadable EXIF — assume the pixel data is already upright
-  }
-}
-
-// Autoexport always hands back a PDF, regardless of what kind of file went
-// in: a source PDF is copied through untouched, but a JPG/PNG is wrapped
-// into a fresh single-page PDF — one page, sized to the image itself, with
-// the image drawn to fill it — via pdf-lib, which needs no native build step
-// (matters for electron-builder). A JPEG's EXIF orientation (see
-// readJpegRotation above) is carried over as the page's own rotation, so it
-// still displays upright; beyond that, no rotation/rescaling: this is a
-// format conversion, not an edit.
-async function writeAutoexportCopy(srcFull, destFull, ext) {
-  if (ext === ".pdf") {
-    fs.copyFileSync(srcFull, destFull);
-    return;
-  }
-  const bytes = fs.readFileSync(srcFull);
-  const pdfDoc = await PDFDocument.create();
-  const image = ext === ".png" ? await pdfDoc.embedPng(bytes) : await pdfDoc.embedJpg(bytes);
-  const page = pdfDoc.addPage([image.width, image.height]);
-  page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
-  if (ext !== ".png") {
-    const rotation = await readJpegRotation(srcFull);
-    if (rotation) page.setRotation(degrees(rotation));
-  }
-  fs.writeFileSync(destFull, await pdfDoc.save());
-}
-
-// The Autoexport button is a "Save As": it writes a file under a fresh
-// yyyyMMdd_HHmmss timestamp name — same naming scheme as autorenameOneFile —
-// into `destFolder`, the per-device autoexport folder (see
-// get/set-autoexport-folder above), and leaves the original completely
-// untouched in the catalog. The output is always named with a .pdf extension
-// — see writeAutoexportCopy above for how a non-PDF source gets there.
-// Collisions are checked against destFolder, not the file's own folder,
-// since that's where the new name actually has to be unique. Returns
-// destFull — the copy's new absolute path — so the renderer can undo by
-// deleting just that copy (see undo-autoexport below).
-async function autoexportOneFile(folder, relPath, destFolder) {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-
-  let name = `${stamp}.pdf`;
-  let n = 1;
-  while (fs.existsSync(path.join(destFolder, name))) {
-    name = `${stamp}_${n}.pdf`;
-    n++;
-  }
-
-  const srcFull = path.join(folder, relPath);
-  const destFull = path.join(destFolder, name);
-  try {
-    fs.mkdirSync(destFolder, { recursive: true });
-    await writeAutoexportCopy(srcFull, destFull, path.extname(relPath).toLowerCase());
-    // A plain copy carries over the source's own last-modified time (same as
-    // an Explorer copy-paste), which would leave the copy showing the
-    // original bill's old date despite its new timestamped filename. Stamp
-    // it to the moment of the autoexport instead, so the two agree.
-    fs.utimesSync(destFull, now, now);
-  } catch (e) {
-    return { error: `Couldn't autoexport "${path.basename(relPath)}": ${e.message}` };
-  }
-  return { destFull, name };
-}
-
-ipcMain.handle("autoexport-file", async (event, folder, relPath, destFolder) => {
-  return autoexportOneFile(folder, relPath, destFolder);
-});
-
-// Autoexports many files in one action, mirroring autorenameFilesBatch: all
-// copies share the same stamp, so each gets a " (n)" suffix (1-indexed in
-// selection order) to keep them from colliding with each other at the
-// destination. Each file is attempted independently (sequentially, since
-// image-to-PDF conversion is async), so one locked/in-use/corrupt file
-// doesn't block the rest.
-async function autoexportFilesBatch(folder, relPaths, destFolder) {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-
-  const saved = [];
-  const errors = [];
-  try {
-    fs.mkdirSync(destFolder, { recursive: true });
-  } catch (e) {
-    return { saved, errors: relPaths.map((p) => ({ path: p, error: `Couldn't reach the autoexport folder: ${e.message}` })) };
-  }
-  for (let i = 0; i < relPaths.length; i++) {
-    const relPath = relPaths[i];
-    let name = `${stamp} (${i + 1}).pdf`;
-    let n = 1;
-    while (fs.existsSync(path.join(destFolder, name))) {
-      name = `${stamp} (${i + 1})_${n}.pdf`;
-      n++;
-    }
-
-    const srcFull = path.join(folder, relPath);
-    const destFull = path.join(destFolder, name);
-    try {
-      await writeAutoexportCopy(srcFull, destFull, path.extname(relPath).toLowerCase());
-      // See the matching comment in autoexportOneFile above.
-      fs.utimesSync(destFull, now, now);
-      saved.push({ source: relPath, destFull, name });
-    } catch (e) {
-      errors.push({ path: relPath, error: `Couldn't autoexport "${path.basename(relPath)}": ${e.message}` });
-    }
-  }
-  return { saved, errors };
-}
-
-ipcMain.handle("autoexport-files-batch", async (event, folder, relPaths, destFolder) => {
-  return autoexportFilesBatch(folder, relPaths, destFolder);
-});
-
-// Undoes an Autoexport. Since autoexportOneFile/autoexportFilesBatch only
-// ever create a new copy — the original file in the catalog is never
-// touched — undoing means deleting that copy outright, not restoring
-// anything.
-ipcMain.handle("undo-autoexport", async (event, destFull) => {
-  try {
-    fs.unlinkSync(destFull);
-  } catch (e) {
-    return { error: `Couldn't undo autoexport: ${e.message}` };
-  }
-  return true;
-});
-
 // Windows/Chromium quirk: after the DOM subtree holding a native <select> is torn
 // down and rebuilt (as happens on every full re-render following a file move),
 // Chromium can leave that select's popup-menu tracking orphaned, and clicking any
@@ -1071,7 +897,7 @@ ipcMain.handle("list-files", async (event, folder) => {
         tags: meta.tags,
         comments: meta.comments,
         rotation: rotations[full] || 0,
-        appForm: readAppForm(full),
+        appForm: normalizeRecord(readAppForm(full)),
       };
     })
   );
@@ -1269,16 +1095,52 @@ function readAppForm(absFile) {
   }
 }
 
-function writeAppForm(absFile, data) {
-  const file = appFormSidecarAbsPath(absFile);
-  unhideFile(file);
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
-  hideFile(file);
+// A small JSON file on the shared OneDrive folder can be briefly locked by
+// the sync client (or by another computer's app mid-write) -- same
+// transient lock update-file-meta retries around (see META_WRITE_RETRIES).
+// These writes are tiny and synchronous, so the short wait between tries
+// just blocks in place.
+const JSON_WRITE_RETRIES = 3;
+const JSON_WRITE_RETRY_DELAY_MS = 300;
+
+function writeJsonRetrying(file, data, { hidden = false } = {}) {
+  const text = JSON.stringify(data, null, 2);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (hidden) unhideFile(file);
+      fs.writeFileSync(file, text, "utf8");
+      if (hidden) hideFile(file);
+      return;
+    } catch (e) {
+      if (attempt >= JSON_WRITE_RETRIES || !["EBUSY", "EPERM", "EACCES"].includes(e.code)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, JSON_WRITE_RETRY_DELAY_MS);
+    }
+  }
 }
 
-ipcMain.handle("save-app-form", async (event, folder, relPath, data) => {
-  writeAppForm(path.join(folder, relPath), data);
-  return data;
+function writeAppForm(absFile, data) {
+  writeJsonRetrying(appFormSidecarAbsPath(absFile), data, { hidden: true });
+}
+
+// Every edit to a record saves just the fields it changed, merged into
+// whatever's on disk *right now* -- not the whole record as this window last
+// loaded it. On the shared folder, someone else may have changed another
+// field of the same application since; writing the whole stale copy back
+// would silently undo their change. Returns the merged record so the
+// renderer picks up anyone else's edits along the way.
+function mergeRecordPatch(current, patch, editor) {
+  const rec = normalizeRecord(current);
+  Object.assign(rec, patch);
+  rec.meta = { ...rec.meta, updatedAt: new Date().toISOString(), lastEditedBy: editor || "Unknown" };
+  return rec;
+}
+
+ipcMain.handle("patch-app-form", async (event, folder, relPath, patch, editor) => {
+  const absFile = path.join(folder, relPath);
+  if (!fs.existsSync(absFile)) throw new Error("This application's file was moved or deleted (possibly on another computer). Refresh to see where it went.");
+  const rec = mergeRecordPatch(readAppForm(absFile), patch, editor);
+  writeAppForm(absFile, rec);
+  return rec;
 });
 
 // ---- Gravity Forms API import ----
@@ -1286,8 +1148,9 @@ ipcMain.handle("save-app-form", async (event, folder, relPath, data) => {
 // The org also collects Member Applications through a Gravity Forms-powered
 // web form; this pulls submitted entries in as applications alongside
 // scanned ones. Connection details (site URL, consumer key/secret, which
-// form, and the field mapping worked out once via the renderer's field-
-// mapping screen) live in a hidden per-folder file, same precedent as
+// form, which plan imports are filed under, and which online fields hold the
+// name/member ID/start date -- see the renderer's API mapping modal) live
+// in a hidden per-folder file, same precedent as
 // TAG_CONFIG_FILENAME above: pointing the app at the shared workspace folder
 // picks the API connection up automatically, no per-device setup.
 const API_CONFIG_FILENAME = ".api-config.json";
@@ -1305,88 +1168,25 @@ function readApiConfig(folder) {
 }
 
 function writeApiConfig(folder, config) {
-  const file = apiConfigPath(folder);
-  unhideFile(file);
-  fs.writeFileSync(file, JSON.stringify(config, null, 2), "utf8");
-  hideFile(file);
+  writeJsonRetrying(apiConfigPath(folder), config, { hidden: true });
 }
 
 ipcMain.handle("get-api-config", async (event, folder) => {
   return readApiConfig(folder);
 });
 
+// The renderer saves its whole copy of the config (a new mapping, say), but
+// someone else may have imported entries since that copy was loaded -- their
+// import history is merged back in rather than dropped. Switching to a
+// different form deliberately starts the history over (see pickApiForm).
 ipcMain.handle("save-api-config", async (event, folder, config) => {
-  writeApiConfig(folder, config);
-  return config;
-});
-
-// ---- Form schema (required/removable fields + custom field definitions) ----
-//
-// The paper form isn't static -- the org has already changed it once and
-// will again -- so which fields are required, which have been deleted (see
-// the renderer's Manage Form Fields screen), the custom field definitions
-// themselves, and the fields' display order all live in their own hidden
-// per-folder file, same precedent as TAG_CONFIG_FILENAME/API_CONFIG_FILENAME
-// above. customFields/appFieldOrder used to live inside .api-config.json,
-// but that only exists for a folder that's connected to an API -- a
-// paper-only folder still needs to be able to add/require/delete/reorder
-// fields, so both moved here.
-const FORM_SCHEMA_FILENAME = ".form-schema.json";
-
-function formSchemaPath(folder) {
-  return path.join(folder, FORM_SCHEMA_FILENAME);
-}
-
-function readFormSchemaFile(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function writeFormSchema(folder, schema) {
-  const file = formSchemaPath(folder);
-  unhideFile(file);
-  fs.writeFileSync(file, JSON.stringify(schema, null, 2), "utf8");
-  hideFile(file);
-}
-
-// One-time migration, same precedent as get-tag-config's oldTagConfigPath
-// migration above: a folder whose custom fields/display order were defined
-// via the old API-mapping screen (stored in .api-config.json's
-// "customFields"/"appFieldOrder") gets a fresh .form-schema.json seeded
-// from them, plus the fields that were hardcoded-required before this
-// screen existed.
-function readFormSchema(folder) {
-  const current = readFormSchemaFile(formSchemaPath(folder));
-  if (current) {
-    hideFile(formSchemaPath(folder));
-    return {
-      removedFields: current.removedFields || [],
-      requiredFields: current.requiredFields || DEFAULT_REQUIRED_FIELDS,
-      customFields: current.customFields || [],
-      appFieldOrder: current.appFieldOrder || [],
-    };
-  }
-  const apiConfig = readApiConfig(folder);
-  const schema = {
-    removedFields: [],
-    requiredFields: DEFAULT_REQUIRED_FIELDS,
-    customFields: (apiConfig && apiConfig.customFields) || [],
-    appFieldOrder: (apiConfig && apiConfig.appFieldOrder) || [],
-  };
-  writeFormSchema(folder, schema);
-  return schema;
-}
-
-ipcMain.handle("get-form-schema", async (event, folder) => {
-  return readFormSchema(folder);
-});
-
-ipcMain.handle("save-form-schema", async (event, folder, schema) => {
-  writeFormSchema(folder, schema);
-  return schema;
+  const current = readApiConfig(folder);
+  const merged =
+    current && current.formId === config.formId
+      ? { ...config, importedEntries: { ...(current.importedEntries || {}), ...(config.importedEntries || {}) } }
+      : config;
+  writeApiConfig(folder, merged);
+  return merged;
 });
 
 // Gravity Forms REST API v2 supports HTTP Basic Auth over HTTPS as an
@@ -1415,75 +1215,29 @@ ipcMain.handle("test-gf-connection", async (event, siteUrl, consumerKey, consume
   return list.map((f) => ({ id: String(f.id), title: f.title || `Form ${f.id}` }));
 });
 
-// Flattens one Gravity Forms field into one mappable row per leaf input: a
-// plain field (text, select, ...) is already a leaf; a compound field (Name,
-// Address, ...) has an `inputs` array and expands into one row per sub-input,
-// keyed "parentId.subInputId" (e.g. "1.3") -- confirmed from docs as the
-// convention entries use for these. Hidden sub-inputs (e.g. an unused Name
-// middle-name field) are skipped since they'll never carry real data.
-//
-// Each row also carries what the Application tab needs to show the field
-// the way the online form asks it (see presentationFromGfInfo in
-// application-form.js): its GF type (`gfType` -- "select", "radio", "date",
-// "consent", "list", ...), a dropdown/radio/multi-select field's `choices`
-// ({ value, label } -- an entry stores the choice's value, which is its
-// text unless the form has "show values" turned on), and a multi-column
-// List field's `columns` (an entry's list value is an array of row objects
-// keyed by exactly those names). A field whose `inputType` says what it
-// really renders as (a Poll/Quiz/Survey question as a "radio", a
-// Product as a "select", ...) is typed by that instead of its own type.
-function gfChoices(field) {
-  if (!Array.isArray(field.choices)) return null;
-  const choices = field.choices
-    .filter((c) => c && (c.text || c.value))
-    .map((c) => ({ value: c.value !== undefined && c.value !== null && c.value !== "" ? String(c.value) : String(c.text), label: String(c.text || c.value) }));
-  return choices.length ? choices : null;
-}
-
+// Every leaf input of the form, as { gfFieldId, label } -- what the mapping
+// modal offers for each of the record's mapped fields. A compound field
+// (Name, Address, ...) has an `inputs` array and contributes one row per
+// sub-input, keyed "parentId.subInputId" (e.g. "1.3") -- confirmed from docs
+// as the convention entries use for these -- so e.g. a Name field's First
+// and Last can be picked separately. Hidden sub-inputs (an unused middle
+// name) are skipped since they'll never carry real data; so are layout-only
+// fields.
 function flattenGfFields(form) {
   const rows = [];
   for (const field of form.fields || []) {
-    const gfType = field.inputType || field.type || null;
+    if (["page", "html", "section", "captcha"].includes(field.type)) continue;
     if (Array.isArray(field.inputs) && field.inputs.length > 0) {
       for (const input of field.inputs) {
         if (input.isHidden) continue;
         rows.push({
           gfFieldId: String(input.id),
-          // A sub-input named the same as its field (a Consent field's
-          // "Consent" checkbox) is just the field -- no "Consent (Consent)".
+          // A sub-input named the same as its field is just the field.
           label: input.label && input.label !== field.label ? `${field.label} (${input.label})` : field.label || `Field ${input.id}`,
-          gfType,
         });
       }
     } else {
-      const row = { gfFieldId: String(field.id), label: field.label || `Field ${field.id}`, gfType };
-      if (gfType === "list") {
-        if (field.enableColumns && Array.isArray(field.choices)) row.columns = field.choices.map((c) => c.text || c.value).filter(Boolean);
-      } else if (gfType === "select" || gfType === "radio" || gfType === "multiselect") {
-        const choices = gfChoices(field);
-        if (choices) row.choices = choices;
-      }
-      rows.push(row);
-    }
-  }
-  return rows;
-}
-
-// The sub-inputs flattenGfFields leaves out as hidden -- not offered for
-// mapping, but some still carry an answer (an Address field with its
-// Country input hidden still submits the default country), and the PDF
-// shows every submitted answer, so it needs their labels too.
-function hiddenGfInputs(form) {
-  const rows = [];
-  for (const field of form.fields || []) {
-    if (!Array.isArray(field.inputs)) continue;
-    for (const input of field.inputs) {
-      if (!input.isHidden) continue;
-      rows.push({
-        gfFieldId: String(input.id),
-        label: input.label && input.label !== field.label ? `${field.label} (${input.label})` : field.label || `Field ${input.id}`,
-        gfType: field.inputType || field.type || null,
-      });
+      rows.push({ gfFieldId: String(field.id), label: field.label || `Field ${field.id}` });
     }
   }
   return rows;
@@ -1495,10 +1249,10 @@ ipcMain.handle("get-gf-form-fields", async (event, siteUrl, consumerKey, consume
 });
 
 // The exact list-entries response envelope couldn't be fully confirmed from
-// docs alone (see the project plan) -- this accepts either a bare array or
-// an {entries, total_count} wrapper rather than assuming one, so a real
-// mismatch surfaces as "0 entries found" (visible, correctable) instead of a
-// thrown error or silently wrong data.
+// docs alone -- this accepts either a bare array or an {entries,
+// total_count} wrapper rather than assuming one, so a real mismatch
+// surfaces as "0 entries found" (visible, correctable) instead of a thrown
+// error or silently wrong data.
 function normalizeEntriesResponse(raw) {
   if (Array.isArray(raw)) return { entries: raw, totalCount: raw.length };
   if (raw && Array.isArray(raw.entries)) {
@@ -1507,170 +1261,86 @@ function normalizeEntriesResponse(raw) {
   return { entries: [], totalCount: 0 };
 }
 
+// The entries endpoint pages its results (10 per page unless asked
+// otherwise), so this walks every page rather than seeing only the newest
+// few submissions.
+const GF_PAGE_SIZE = 100;
+const GF_MAX_PAGES = 50;
+
+async function fetchAllGfEntries(config) {
+  const all = [];
+  let totalCount = 0;
+  for (let page = 1; page <= GF_MAX_PAGES; page++) {
+    const raw = await gfFetch(
+      config.siteUrl,
+      config.consumerKey,
+      config.consumerSecret,
+      `forms/${config.formId}/entries?paging[page_size]=${GF_PAGE_SIZE}&paging[current_page]=${page}`
+    );
+    const { entries, totalCount: total } = normalizeEntriesResponse(raw);
+    totalCount = Math.max(totalCount, total);
+    all.push(...entries);
+    if (entries.length < GF_PAGE_SIZE || all.length >= totalCount) break;
+  }
+  return { entries: all, totalCount: Math.max(totalCount, all.length) };
+}
+
+// Which online field feeds each mapped record field: { firstName,
+// lastName, memberId, startDate }, each a gfFieldId or "". A connection
+// saved by version 0.1.x only has the old full-form `fieldMapping` -- its
+// primary member's first/last name carry over from that.
+function recordMapping(config) {
+  if (config.recordMapping) return config.recordMapping;
+  const legacy = (target) => ((config.fieldMapping || []).find((m) => m.target === target) || {}).gfFieldId || "";
+  return { firstName: legacy("member:primary.firstName"), lastName: legacy("member:primary.lastName"), memberId: "", startDate: "" };
+}
+
+// The record fields one entry fills in, per the mapping. Blank answers are
+// left out, so a caller merging into an existing record never blanks a value.
+function mappedRecordFields(entry, mapping) {
+  const get = (id) => (id ? String(entry[id] ?? "").trim() : "");
+  const fields = {};
+  const name = [get(mapping.firstName), get(mapping.lastName)].filter(Boolean).join(" ");
+  if (name) fields.name = name;
+  if (get(mapping.memberId)) fields.memberId = get(mapping.memberId);
+  const startDate = normalizeDateToIso(get(mapping.startDate));
+  if (startDate) fields.startDate = startDate;
+  return fields;
+}
+
+ipcMain.handle("get-record-mapping", async (event, folder) => {
+  const config = readApiConfig(folder);
+  return config ? recordMapping(config) : null;
+});
+
 ipcMain.handle("list-gf-entries", async (event, folder) => {
   const config = readApiConfig(folder);
   if (!config || !config.formId) throw new Error("No API connection configured for this folder yet.");
-  const raw = await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}/entries`);
-  const { entries, totalCount } = normalizeEntriesResponse(raw);
+  const { entries, totalCount } = await fetchAllGfEntries(config);
   const imported = config.importedEntries || {};
   // An entry whose imported file has since been deleted is offered again --
-  // that's how an application gets re-imported (e.g. to regenerate its PDF
-  // after the layout or field mapping changed).
+  // that's how an application gets re-imported (e.g. to regenerate its PDF).
   const stillImported = (id) => imported[id] && fs.existsSync(path.join(folder, imported[id]));
-  const notImported = entries.filter((e) => !stillImported(String(e.id)));
-  const firstNameMap = (config.fieldMapping || []).find((m) => m.target === "member:primary.firstName");
-  const lastNameMap = (config.fieldMapping || []).find((m) => m.target === "member:primary.lastName");
-  const summarized = notImported.map((e) => {
-    const name = [firstNameMap && e[firstNameMap.gfFieldId], lastNameMap && e[lastNameMap.gfFieldId]]
-      .filter(Boolean)
-      .join(" ");
-    return { id: String(e.id), date: e.date_created || "", name: name || null };
-  });
+  const mapping = recordMapping(config);
+  const summarized = entries
+    .filter((e) => !stillImported(String(e.id)))
+    .map((e) => ({ id: String(e.id), date: e.date_created || "", name: mappedRecordFields(e, mapping).name || null }));
   return { totalFetched: totalCount, entries: summarized };
 });
-
-// Resolves one fieldMapping target (see .api-config.json's shape) against a
-// specific appForm object into { obj, key, isExtra } -- read via obj[key],
-// written via obj[key] = value -- or null for "ignore"/an unrecognized
-// target. Shared by applyGfEntryToAppForm (fresh import) and
-// remap-imported-entries (fixing an existing one) below, so "how a target
-// maps onto the schema" is defined exactly once.
-//
-// A member:<slot>.<key> target is found by matching a household member's
-// importSlot tag -- a non-schema provenance property set below (and never
-// touched by the renderer) recording which import slot ("primary",
-// "spouse", "slot2", "slot3", ...) a member came from, since the persisted
-// schema otherwise has no way to tell "the household member from slot 3"
-// apart from one a person added by hand in the review screen. If no
-// matching member exists yet, one is created (falling back to matching by
-// role for "primary"/"spouse" first, since a member created before this
-// tagging existed -- or entered on paper -- won't carry the tag).
-// Finds the household member for a given import slot ("primary", "spouse",
-// "slot2", ...), matched first by its importSlot tag and, for primary/
-// spouse only, falling back to role (a member entered on paper, or created
-// before this tagging existed, won't carry the tag but is still THE
-// primary/spouse). Creates one if none exists yet. Shared by the member:
-// and membercustom: branches of resolveAppFormTarget below.
-function resolveOrCreateMemberForSlot(appForm, slot) {
-  let member = appForm.householdMembers.find((m) => m.importSlot === slot);
-  if (!member && slot === "primary") member = appForm.householdMembers.find((m) => m.role === "primary");
-  if (!member && slot === "spouse") member = appForm.householdMembers.find((m) => m.role === "spouse");
-  if (!member) {
-    const role = slot === "primary" ? "primary" : slot === "spouse" ? "spouse" : "child";
-    member = makeBlankHouseholdMember(role);
-    member.importSlot = slot;
-    appForm.householdMembers.push(member);
-  }
-  return member;
-}
-
-function resolveAppFormTarget(appForm, target, removedFields) {
-  if (!target || target === "ignore") return null;
-  if (removedFields && removedFields.includes(target)) return null; // treated like "ignore" -- see .form-schema.json
-  if (target.startsWith("household.")) {
-    return { obj: appForm.household, key: target.slice("household.".length), isExtra: false };
-  }
-  if (target.startsWith("member:")) {
-    const rest = target.slice("member:".length);
-    const dot = rest.indexOf(".");
-    if (dot === -1) return null;
-    const slot = rest.slice(0, dot);
-    // The remainder can itself be a nested path (e.g. "health.height" for a
-    // member:primary.health.height target, not just a flat "firstName"), so
-    // it's walked the same way appFieldTarget in application-form.js walks
-    // any other dotted path -- one level of nesting isn't enough here.
-    const path = rest.slice(dot + 1).split(".");
-    const member = resolveOrCreateMemberForSlot(appForm, slot);
-    let obj = member;
-    for (let i = 0; i < path.length - 1; i++) {
-      obj = obj[path[i]];
-      if (obj == null) return null;
-    }
-    return { obj, key: path[path.length - 1], isExtra: false };
-  }
-  // A custom field explicitly categorized under one member (see the API
-  // mapping screen's "add as a new field under: Primary member/Spouse/
-  // Household Member N" choices) rather than the household-level catch-all
-  // below -- lands in that member's OWN extraFields bag (see
-  // makeBlankHouseholdMember), not appForm's, so e.g. two different
-  // household members can each have their own value for a same-named field.
-  if (target.startsWith("membercustom:")) {
-    const rest = target.slice("membercustom:".length);
-    const dot = rest.indexOf(".");
-    if (dot === -1) return null;
-    const slot = rest.slice(0, dot);
-    const key = rest.slice(dot + 1);
-    const member = resolveOrCreateMemberForSlot(appForm, slot);
-    if (!member.extraFields) member.extraFields = {};
-    return { obj: member.extraFields, key, isExtra: true };
-  }
-  if (target.startsWith("custom:")) {
-    return { obj: appForm.extraFields, key: target.slice("custom:".length), isExtra: true };
-  }
-  return null;
-}
-
-// Builds one appForm object (same shape the renderer's Application tab
-// reads/writes -- see makeBlankAppForm/makeBlankHouseholdMember, shared via
-// application-form.js's module.exports guard) from one raw Gravity Forms
-// entry, per the folder's configured fieldMapping. ignore/unmapped fields
-// are simply not carried over (they're still visible in the generated
-// summary PDF, which lists every submitted answer regardless of mapping).
-function applyGfEntryToAppForm(entry, fieldMapping, removedFields) {
-  const appForm = makeBlankAppForm();
-  appForm.householdMembers[0].importSlot = "primary";
-  const dependentRows = [];
-  for (const map of fieldMapping || []) {
-    const value = entry[map.gfFieldId];
-    if (value === undefined || value === "") continue;
-    // Collected now, merged once every other field is in place -- the
-    // dependents' own Health History Questionnaire slots (mapped later in
-    // the form) need to exist first so a list row can fill in that same
-    // person instead of adding a second copy (see mergeDependentRows).
-    if (map.target === DEPENDENTS_TARGET) {
-      if (Array.isArray(value) && !(removedFields || []).includes(DEPENDENTS_TARGET)) dependentRows.push(...value);
-      continue;
-    }
-    const resolved = resolveAppFormTarget(appForm, map.target, removedFields);
-    if (!resolved) continue;
-    // A "No ___ history" checkbox fed by a Yes/No question: "Past Medical
-    // History: No" means the box is checked -- see interpretNoFlagAnswer.
-    if (!resolved.isExtra && NO_HISTORY_FLAG_KEYS.includes(resolved.key) && /\.health\.[^.]+$/.test(map.target)) {
-      resolved.obj[resolved.key] = interpretNoFlagAnswer(value, map.label);
-      continue;
-    }
-    // A List answer (an array of row objects) stays an array in a custom
-    // field, which renders it as a table; a built-in field is always a
-    // single text value, so it gets the list flattened to readable text
-    // instead of "[object Object]".
-    resolved.obj[resolved.key] = Array.isArray(value) && !resolved.isExtra ? formatAnswerText(value) : value;
-  }
-  mergeDependentRows(appForm, dependentRows);
-  return appForm;
-}
 
 ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
   const config = readApiConfig(folder);
   if (!config || !config.formId) throw new Error("No API connection configured for this folder yet.");
-  const raw = await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}/entries`);
-  const { entries } = normalizeEntriesResponse(raw);
+  const { entries } = await fetchAllGfEntries(config);
   const byId = new Map(entries.map((e) => [String(e.id), e]));
-  const schema = readFormSchema(folder);
-  const removedFields = schema.removedFields;
-  // Refresh each mapped field's online type/choices/columns from the form's
-  // current field list (see enrichFieldMapping) -- the Application tab shows
-  // fields the way the online form asks them, and the PDF tells consents,
-  // checkboxes, dropdowns and lists apart, both from this. Best-effort: if
-  // the form can't be fetched, the import still goes ahead with whatever the
-  // saved mapping already carries.
-  let gfFields = [];
-  let hiddenInputs = [];
+  // The PDF lists every answer under the form's own labels and sections.
+  // Best-effort: if the form can't be fetched, the PDF falls back to
+  // numbered fields and the import still goes ahead.
+  let fields = [];
   try {
-    const gfForm = await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}`);
-    gfFields = flattenGfFields(gfForm);
-    hiddenInputs = hiddenGfInputs(gfForm);
+    fields = (await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}`)).fields || [];
   } catch {}
-  const fieldMapping = enrichFieldMapping(config.fieldMapping || [], gfFields).fieldMapping;
+  const mapping = recordMapping(config);
   const inboxDir = path.join(folder, "Inbox");
   fs.mkdirSync(inboxDir, { recursive: true });
   const imported = [];
@@ -1683,10 +1353,9 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
       continue;
     }
     try {
-      const appForm = applyGfEntryToAppForm(entry, fieldMapping, removedFields);
-      const primary = appForm.householdMembers.find((m) => m.role === "primary");
-      const displayName = [primary?.firstName, primary?.lastName].filter(Boolean).join(" ") || `Entry ${id}`;
-      const safeName = displayName.replace(/[\\/:*?"<>|]/g, "_");
+      const record = { ...makeBlankRecord(config.plan || ""), ...mappedRecordFields(entry, mapping) };
+      record.meta = { source: "online", gfEntryId: String(id), importedAt: new Date().toISOString() };
+      const safeName = (record.name || `Entry ${id}`).replace(/[\\/:*?"<>|]/g, "_");
       let fileName = `Online - ${safeName} - ${id}.pdf`;
       let destFull = path.join(inboxDir, fileName);
       let n = 1;
@@ -1694,17 +1363,9 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
         fileName = `Online - ${safeName} - ${id} (${n++}).pdf`;
         destFull = path.join(inboxDir, fileName);
       }
-      const pdfBytes = await generateApplicationPdf({
-        appForm,
-        entry,
-        fieldMapping,
-        hiddenInputs,
-        customFields: schema.customFields,
-        removedFields,
-      });
-      fs.writeFileSync(destFull, pdfBytes);
+      fs.writeFileSync(destFull, await generateApplicationPdf({ entry, fields, plan: record.plan }));
       await writeFileMeta(destFull, ".pdf", ["API"], []);
-      writeAppForm(destFull, appForm);
+      writeAppForm(destFull, record);
       const relPath = path.relative(folder, destFull).split(path.sep).join("/");
       importedEntries[String(id)] = relPath;
       imported.push({ id, path: relPath });
@@ -1712,66 +1373,248 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
       errors.push({ id, error: e.message });
     }
   }
-  writeApiConfig(folder, { ...config, fieldMapping, importedEntries });
+  // Re-read before writing: an import can take a while, and someone else may
+  // have saved the config (or imported) in the meantime.
+  const latest = readApiConfig(folder) || config;
+  writeApiConfig(folder, { ...latest, importedEntries: { ...(latest.importedEntries || {}), ...importedEntries } });
   return { imported, errors };
 });
 
-// Re-derives already-imported applications' data after the folder's field
-// mapping changes -- e.g. a field that was mistakenly left as an unattached
-// custom field now correctly targets a household-member slot. Reads each
-// entry's CURRENT sidecar (not a fresh API fetch), so this always carries
-// forward whatever's on disk right now, including any edit staff already
-// made since the original import -- and never overwrites a destination that
-// already has a value, the one real safety rule here.
-ipcMain.handle("remap-imported-entries", async (event, folder, oldFieldMapping, newFieldMapping) => {
+// After the mapping changes (or is set up for the first time on a
+// connection that already has imports), fills in already-imported
+// applications' name/member ID/start date -- and their plan, if they don't
+// have one yet -- from a fresh fetch of their entries. Only ever fills a
+// blank field: anything staff already typed in stays as it is.
+ipcMain.handle("apply-mapping-to-imported", async (event, folder) => {
   const config = readApiConfig(folder);
-  if (!config) throw new Error("No API connection configured for this folder yet.");
-  const removedFields = readFormSchema(folder).removedFields;
-  const oldByGfId = new Map((oldFieldMapping || []).map((m) => [m.gfFieldId, m]));
-  const changed = (newFieldMapping || []).filter((m) => {
-    const old = oldByGfId.get(m.gfFieldId);
-    return old && old.target !== m.target;
-  });
-  const migrated = [];
-  const skipped = [];
+  if (!config || !config.formId) return { updated: 0 };
   const importedEntries = config.importedEntries || {};
-  for (const [, relPath] of Object.entries(importedEntries)) {
+  if (Object.keys(importedEntries).length === 0) return { updated: 0 };
+  const { entries } = await fetchAllGfEntries(config);
+  const byId = new Map(entries.map((e) => [String(e.id), e]));
+  const mapping = recordMapping(config);
+  let updated = 0;
+  for (const [id, relPath] of Object.entries(importedEntries)) {
     const absPath = path.join(folder, relPath);
-    const appForm = readAppForm(absPath);
-    if (!appForm) continue;
+    const entry = byId.get(id);
+    if (!entry || !fs.existsSync(absPath)) continue;
+    const record = normalizeRecord(readAppForm(absPath));
+    const fill = { ...mappedRecordFields(entry, mapping), ...(config.plan ? { plan: config.plan } : {}) };
     let touched = false;
-    for (const map of changed) {
-      const old = oldByGfId.get(map.gfFieldId);
-      const oldResolved = resolveAppFormTarget(appForm, old.target, removedFields);
-      if (!oldResolved) continue;
-      const oldValue = oldResolved.obj[oldResolved.key];
-      if (oldValue === undefined || oldValue === "") continue;
-      // Retargeted to Children / Dependents (typically a List field that was
-      // first mapped as a plain custom field): each list row becomes -- or
-      // fills in -- a household member, and the list itself goes away.
-      if (map.target === DEPENDENTS_TARGET) {
-        if (!Array.isArray(oldValue) || (removedFields || []).includes(DEPENDENTS_TARGET)) continue;
-        mergeDependentRows(appForm, oldValue);
-        if (oldResolved.isExtra) delete oldResolved.obj[oldResolved.key];
-        else oldResolved.obj[oldResolved.key] = "";
-        migrated.push({ path: relPath, field: map.label, from: old.target, to: map.target });
-        touched = true;
-        continue;
-      }
-      const newResolved = resolveAppFormTarget(appForm, map.target, removedFields);
-      if (!newResolved) continue; // e.g. retargeted to "ignore" -- nothing sensible to move to, leave the old value in place
-      const newValue = newResolved.obj[newResolved.key];
-      if (newValue !== undefined && newValue !== "") {
-        skipped.push({ path: relPath, field: map.label, reason: "destination already has a value" });
-        continue;
-      }
-      newResolved.obj[newResolved.key] = oldValue;
-      if (oldResolved.isExtra) delete oldResolved.obj[oldResolved.key];
-      else oldResolved.obj[oldResolved.key] = "";
-      migrated.push({ path: relPath, field: map.label, from: old.target, to: map.target });
+    for (const [key, value] of Object.entries(fill)) {
+      if (record[key]) continue;
+      record[key] = value;
       touched = true;
     }
-    if (touched) writeAppForm(absPath, appForm);
+    if (!touched) continue;
+    writeAppForm(absPath, record);
+    updated++;
   }
-  return { migrated, skipped };
+  return { updated };
+});
+
+// ---- Plans ----
+//
+// The list of plans (funds) an application can belong to -- MAAP and AMCA
+// to start, with room for more. Same hidden per-folder precedent as
+// TAG_CONFIG_FILENAME: every computer pointed at the shared folder sees the
+// same list. Which plan a given application belongs to is its own record's
+// `plan` field (see application-form.js), not this file.
+const PLANS_FILENAME = ".plans.json";
+
+// Seeds the defaults only when the file genuinely doesn't exist yet. One
+// that exists but can't be read right now (locked, or half-synced by
+// OneDrive) falls back to the defaults for display without writing them --
+// overwriting it would throw away plans someone else added.
+function readPlans(folder) {
+  const file = path.join(folder, PLANS_FILENAME);
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") writePlans(folder, DEFAULT_PLANS);
+    return [...DEFAULT_PLANS];
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed.plans)) return parsed.plans;
+  } catch {}
+  return [...DEFAULT_PLANS];
+}
+
+function writePlans(folder, plans) {
+  writeJsonRetrying(path.join(folder, PLANS_FILENAME), { plans }, { hidden: true });
+}
+
+ipcMain.handle("get-plans", async (event, folder) => readPlans(folder));
+
+ipcMain.handle("save-plans", async (event, folder, plans) => {
+  writePlans(folder, plans);
+  return plans;
+});
+
+// ---- Record-only rows ----
+//
+// Tracker rows with no application file behind them -- members carried
+// over from the old Member Tracker spreadsheet (see import-tracker-xlsx), or
+// a row added by hand from the Tracker view. One small JSON file per row in
+// a hidden `.records` folder (skipped by walkFiles/walkFolders like any
+// dotfolder) rather than one shared file: several people editing different
+// rows of one file on a synced OneDrive folder would keep tripping over each
+// other's conflict copies, while separate files only ever conflict when two
+// people edit the very same row.
+const RECORDS_DIRNAME = ".records";
+
+function recordsDir(folder) {
+  return path.join(folder, RECORDS_DIRNAME);
+}
+
+function recordPath(folder, id) {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`Invalid record id "${id}".`);
+  return path.join(recordsDir(folder), `${id}.json`);
+}
+
+function writeRecord(folder, id, data) {
+  const dir = recordsDir(folder);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    hideFile(dir);
+  }
+  const { id: _omit, ...body } = data;
+  writeJsonRetrying(recordPath(folder, id), body);
+}
+
+function newRecordId() {
+  return `r${Date.now().toString(36)}${crypto.randomBytes(4).toString("hex")}`;
+}
+
+function readRecordsDir(folder) {
+  let names = [];
+  try {
+    names = fs.readdirSync(recordsDir(folder)).filter((n) => n.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const records = [];
+  for (const name of names) {
+    try {
+      const rec = normalizeRecord(JSON.parse(fs.readFileSync(path.join(recordsDir(folder), name), "utf8")));
+      rec.id = name.slice(0, -".json".length);
+      records.push(rec);
+    } catch {
+      // A half-synced or hand-mangled file -- skip it rather than fail the whole list.
+    }
+  }
+  return records;
+}
+
+ipcMain.handle("list-records", async (event, folder) => readRecordsDir(folder));
+
+// Writes a whole record: creating one (`id` null -- returns it with its new
+// id), or putting back one Undo is restoring after a delete. Ordinary edits
+// go through patch-record instead.
+ipcMain.handle("save-record", async (event, folder, id, data) => {
+  const recordId = id || newRecordId();
+  writeRecord(folder, recordId, data);
+  return { ...data, id: recordId };
+});
+
+// Same field-by-field merge as patch-app-form. A row someone else has
+// deleted stays deleted rather than being quietly recreated by an edit made
+// from a screen that hadn't caught up yet.
+ipcMain.handle("patch-record", async (event, folder, id, patch, editor) => {
+  let current;
+  try {
+    current = JSON.parse(fs.readFileSync(recordPath(folder, id), "utf8"));
+  } catch (e) {
+    if (e.code === "ENOENT") throw new Error("This row was deleted (possibly on another computer). Refresh to catch up.");
+    throw e;
+  }
+  const rec = mergeRecordPatch(current, patch, editor);
+  writeRecord(folder, id, rec);
+  return { ...rec, id };
+});
+
+ipcMain.handle("delete-record", async (event, folder, id) => {
+  try {
+    fs.unlinkSync(recordPath(folder, id));
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  return true;
+});
+
+// ---- Tracker spreadsheet import/export ----
+
+// A one-time carry-over of the old Member Tracker workbook: each "<Plan>
+// Members" sheet becomes record-only rows under that plan (added to the
+// plan list if it's new). A row already present -- same plan, name, and
+// entry date, whether as a record-only row or an application file -- is
+// skipped, so importing the same workbook twice doesn't double it up.
+//
+// The old tracker sometimes has a member's start date typed into the Entry
+// Date column, which shows up as an entry date in the future. Those become
+// the row's Member Start Date (if it doesn't already have one), and the
+// entry date becomes the day of the import. The sheet's original date is
+// kept as meta.sourceEntryDate, so a re-import still recognizes the row.
+ipcMain.handle("import-tracker-xlsx", async (event, folder) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Import tracker spreadsheet",
+    properties: ["openFile"],
+    filters: [{ name: "Excel workbook", extensions: ["xlsx"] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const sheets = await readTrackerWorkbook(result.filePaths[0]);
+
+  const key = (r) => `${String(r.plan).toLowerCase()}|${String(r.name).trim().toLowerCase()}|${(r.meta && r.meta.sourceEntryDate) || r.entryDate}`;
+  const existing = new Set(readRecordsDir(folder).map(key));
+  for (const { relPath } of walkFiles(folder)) {
+    const rec = readAppForm(path.join(folder, relPath));
+    if (rec) existing.add(key(normalizeRecord(rec)));
+  }
+
+  const plans = readPlans(folder);
+  const today = todayIso();
+  const perPlan = [];
+  const addedIds = []; // lets the renderer undo the whole import
+  let futureDated = 0;
+  for (const sheet of sheets) {
+    if (sheet.plan && !plans.includes(sheet.plan)) plans.push(sheet.plan);
+    let added = 0;
+    let duplicates = 0;
+    for (const rec of sheet.records) {
+      if (existing.has(key(rec))) {
+        duplicates++;
+        continue;
+      }
+      existing.add(key(rec));
+      if (rec.entryDate > today) {
+        rec.meta = { ...rec.meta, sourceEntryDate: rec.entryDate };
+        if (!rec.startDate) rec.startDate = rec.entryDate;
+        rec.entryDate = today;
+        futureDated++;
+      }
+      const id = newRecordId();
+      writeRecord(folder, id, rec);
+      addedIds.push(id);
+      added++;
+    }
+    perPlan.push({ plan: sheet.plan, added, duplicates });
+  }
+  writePlans(folder, plans);
+  return { file: path.basename(result.filePaths[0]), perPlan, addedIds, futureDated };
+});
+
+// `plans` is [{ name, records }] -- already filtered by the renderer to
+// what the Tracker is showing.
+ipcMain.handle("export-tracker-xlsx", async (event, plans, year, suggestedName) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: "Export tracker to Excel",
+    defaultPath: path.join(app.getPath("documents"), suggestedName),
+    filters: [{ name: "Excel workbook", extensions: ["xlsx"] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  await writeTrackerWorkbook(result.filePath, plans, year);
+  shell.showItemInFolder(result.filePath);
+  return result.filePath;
 });

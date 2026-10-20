@@ -1,9 +1,12 @@
-# ApplicationManager — desktop file manager
+# ApplicationManager — application holding space and member tracker
 Private - Anabaptist Brotherhood internal use only
 
-A Windows and Mac desktop app (built with Electron) that browses a real folder on your
-computer, previews PDFs/JPGs/PNGs, and lets you tag and comment on each
-file. Tags and comments are written directly into each file's own native
+A Windows and Mac desktop app (built with Electron) that holds Member
+Applications — scanned paper ones and ones imported from the online form —
+while they wait to be entered into the membership software, and tracks each
+one through entry and member-card mailing per plan (MAAP, AMCA, and any
+added later). It browses a real folder on your computer, previews
+PDFs/JPGs/PNGs, and lets you tag and comment on each file. Tags and comments are written directly into each file's own native
 metadata (PDF Info dictionary Keywords/Subject; JPG/PNG Keywords/Comment) via
 [ExifTool](https://exiftool.org), so nothing extra is created in the folder
 and the tags/comments travel with the file itself. A file can hold multiple
@@ -96,33 +99,70 @@ per platform automatically, so this can be run entirely from Windows.
   written into the chosen folder itself, so it travels with the folder rather
   than staying tied to one machine's install of the app. It's skipped by the
   file grid and folder tree like any other dotfile.
-- Review mode's "Application" tab (the Member Application data-entry form)
-  saves its answers into a hidden per-file sidecar next to the source file
-  itself, named `.<filename>.appform.json` — e.g. `Smith Family Scan.pdf`
-  gets a `.Smith Family Scan.pdf.appform.json` alongside it. It's skipped by
+- Each application's record — Plan, Name, Member ID, Application Entry
+  Date, Member Start Date, and Member Card Sent (plus Notes; the date the
+  card was marked sent is recorded automatically) — is edited in the
+  preview pane's Application section or straight in the Tracker, and saved
+  into a hidden per-file sidecar next to the source file itself, named
+  `.<filename>.appform.json` — e.g. `Smith Family Scan.pdf` gets a
+  `.Smith Family Scan.pdf.appform.json` alongside it. A sidecar written by
+  version 0.1.x (the old full paper-form schema) still opens: its primary
+  member's name carries over, and the rest is kept untouched under
+  `legacy` in the same file. It's skipped by
   the grid/folder tree like any other dotfile, and moves/renames/deletes
   (and Undo) of the source file bring it along automatically. Renaming or
   moving that PDF from outside the app (e.g. Windows Explorer) orphans the
   sidecar — reopen the review folder in place afterward rather than
   drag-copying it elsewhere, since dragging a folder in also leaves any
-  sidecars already inside it behind. This sidecar-per-file approach has no
-  real-time conflict resolution: two people editing the same application at
-  the same moment on a shared OneDrive folder will get whatever OneDrive's
-  own conflict-copy behavior produces, same as already applies to
-  `.catalog-tags.json` above.
+  sidecars already inside it behind.
+- Shared OneDrive folder, several people at once: every edit saves only the
+  field(s) it changed, merged into the record as it is on disk at that
+  moment (and Undo puts back only those fields), so two people working on
+  different applications — or different fields of the same one — never
+  overwrite each other, even from a screen that hasn't refreshed yet. The
+  app rescans every 5 minutes and whenever its window comes back into focus
+  (at most once a minute), so others' changes show up without a manual
+  refresh. A write that hits a file OneDrive has momentarily locked is
+  retried, and one that still fails says so instead of being lost. An edit
+  to a row someone else deleted is refused rather than bringing the row
+  back. What's left is two people changing the *same field* of the *same
+  application* within the same few seconds: the later save wins, or
+  OneDrive keeps both as a conflict copy (a stray copy of a record-only row
+  would show up as a duplicate tracker row, which can simply be deleted).
+- Plans: which plan an application belongs to is a field on its own record,
+  so the rail's Plans list (All plans / each plan / No plan) filters the
+  Files, Tracker, and Summary views alike. The list of plans lives in a
+  hidden `.plans.json` in the folder (seeded with MAAP and AMCA; "Manage"
+  adds more). A freshly scanned file has no plan until someone gives it one
+  — the multi-select pane can set the plan on a whole batch at once.
+- Tracker: the old Member Tracker spreadsheet, live — one row per
+  application in the selected plan, every cell editable in place, sortable,
+  filterable by status (Awaiting entry → Pending card → Complete, worked
+  out from the entry date and card checkbox). Rows can also exist without
+  any file: members carried over from the old spreadsheet (Plans > Manage >
+  Import spreadsheet…, a one-time import that skips rows already present)
+  or added by hand with "Add row". Those live one per file in a hidden
+  `.records` folder, so two people editing different rows on a shared
+  OneDrive folder never collide.
+- Summary: per plan, the running totals plus the old spreadsheet's monthly
+  (for a chosen year) and weekly (last 10 weeks) tables, counted by
+  Application Entry Date. "Export to Excel" (Tracker or Summary) saves a
+  workbook with a Members sheet and a Summary sheet per plan in scope.
 - The rail's "Online Applications" section connects the folder to a Gravity
   Forms-powered web form (via its REST API, using a consumer key/secret
   entered once through "Connect") so submissions can be imported alongside
-  scanned ones. The connection, form choice, and field mapping are saved into
-  another hidden per-folder file, `.api-config.json` — same reasoning as
-  `.catalog-tags.json`: every computer pointed at the shared folder picks up
-  the same connection automatically. Mapping a field to "Add as new field"
-  adds it to every application's form (scanned or online) under "Additional
-  Fields", not just imported ones — that's what keeps this one shared form
-  rather than two separate ones. "Import" drops each new submission into an
-  `Inbox` subfolder (created if missing) as an auto-generated summary PDF
-  plus its own `.appform.json` sidecar, pre-filled per the mapping, and tags
-  it `API` so it's easy to tell apart from a scanned application at a glance.
+  scanned ones. The connection, form choice, mapping, and import history are
+  saved into another hidden per-folder file, `.api-config.json` — same
+  reasoning as `.catalog-tags.json`: every computer pointed at the shared
+  folder picks up the same connection automatically. Only three things are
+  mapped ("Mapping"): which online answers hold the name, the member ID,
+  and the member start date — plus which plan imports are filed under.
+  "Import" drops each new submission into an `Inbox` subfolder (created if
+  missing) as a PDF listing every answered field under the online form's own
+  labels and sections, plus its `.appform.json` record, and tags it `API` so
+  it's easy to tell apart from a scanned application at a glance. Saving a
+  changed mapping fills in any already-imported application missing one of
+  those values, without overwriting anything already entered.
 - Deleting a file (with a confirmation prompt first), moving a file, editing
   its tags/comments, or renaming/deleting a predefined tag in the tag manager
   can all be undone with the "Undo" button in the top bar (or Ctrl+Z), one step

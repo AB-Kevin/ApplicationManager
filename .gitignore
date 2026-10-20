@@ -25,3 +25,5 @@ pnpm-debug.log*
 # OS files
 .DS_Store
 Thumbs.db
+# Spreadsheets (e.g. member tracker exports) - may contain member data
+*.xlsx

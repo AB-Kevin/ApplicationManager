@@ -1,7 +1,7 @@
 {
   "name": "applicationmanager-file-manager",
   "version": "0.1.2",
-  "description": "ApplicationManager - a desktop file manager with preview, tagging, and notes",
+  "description": "ApplicationManager - a holding space and member tracker for Member Applications",
   "main": "main.js",
   "author": "",
   "license": "MIT",
@@ -23,6 +23,7 @@
       "main.js",
       "preload.js",
       "application-pdf.js",
+      "tracker-xlsx.js",
       "assets/**/*",
       "renderer/**/*"
     ],
@@ -55,7 +56,13 @@
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
+    "exceljs": "^4.4.0",
     "exiftool-vendored": "^37.1.0",
     "pdf-lib": "^1.17.1"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
   }
 }

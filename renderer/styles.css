@@ -222,6 +222,9 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
    correctly). Only review mode's pane resizes this way — the ordinary
    grid/list view's preview stays a fixed 384px, same as before. */
 .bm-body-review { grid-template-columns: 1fr var(--review-preview-width, 384px); }
+/* The Tracker and Summary views (see renderTrackerMain/renderSummaryMain)
+   drop the preview pane -- a table that wide needs the room. */
+.bm-body-wide { grid-template-columns: 268px 1fr; }
 
 /* ---- Startup loading screen (see renderLoadingScreen in renderer.js) ---- */
 .bm-loading-screen {
@@ -285,6 +288,9 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
   padding-top: var(--space-6);
 }
 .bm-rail-label-row .bm-rail-label { padding-bottom: 0; }
+/* A row with more links than fit beside its label (Online Applications'
+   Import/Mapping/Settings) drops them onto their own line. */
+.bm-rail-label-row-wrap { flex-wrap: wrap; row-gap: var(--space-2); }
 .bm-rail-link {
   cursor: pointer; border-bottom: 1px solid var(--border-reversed); color: var(--on-rail);
   background: none; border-top: none; border-left: none; border-right: none; padding: 0;
@@ -663,69 +669,50 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-preview-scroll > *:not(:last-child) { margin-bottom: var(--space-2); }
 .bm-preview-scroll > * + * { padding-top: var(--space-5); border-top: 1px solid var(--border-hairline); }
 
-/* ---- Review mode's Application / Tags & Comments tab strip ---- */
-.bm-review-tabs { display: flex; gap: var(--space-2); border-bottom: 1px solid var(--border-hairline); flex-shrink: 0; }
-.bm-review-tab {
-  background: none; border: none; border-bottom: 2px solid transparent; padding: var(--space-2) 2px;
-  margin-bottom: -1px; font-size: 13px; font-weight: 500; color: var(--text-muted); cursor: pointer;
+/* ---- Main area tabs (Files / Tracker / Summary, see renderMainTabsHtml) ---- */
+.bm-main-tabs {
+  display: flex; align-items: flex-end; gap: var(--space-5); padding: var(--space-4) var(--space-6) 0;
+  border-bottom: 1px solid var(--border-hairline); flex-shrink: 0;
 }
-.bm-review-tab.active { color: var(--text-heading); border-bottom-color: var(--accent-text); }
-.bm-review-tab:hover:not(.active) { color: var(--text-body); }
+.bm-main-tab {
+  background: none; border: none; border-bottom: 2px solid transparent; padding: var(--space-2) 2px;
+  margin-bottom: -1px; font-family: var(--font-sans); font-size: 14px; font-weight: 500; color: var(--text-muted); cursor: pointer;
+}
+.bm-main-tab.active { color: var(--text-heading); border-bottom-color: var(--accent-text); }
+.bm-main-tab:hover:not(.active) { color: var(--text-body); }
+.bm-main-tabs-scope {
+  margin-left: auto; align-self: center; font-family: var(--font-condensed); font-size: 12px; letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--accent-text); background: var(--green-100); border-radius: var(--radius-control); padding: 3px 8px;
+}
 
-/* ---- Application review form (application-form.js) ---- */
+/* ---- Application status (see application-form.js's STATUSES) ----
+   A dot plus the status's own label -- never color alone. The label wears
+   body text; only the dot carries the status color. */
+.bm-status {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; color: var(--text-body);
+  border: 1px solid var(--border-hairline); border-radius: 999px; padding: 2px 9px 2px 7px; background: var(--surface-card);
+}
+.bm-status::before, .bm-status-dot { content: ""; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
+.bm-status--awaiting::before, .bm-status-dot--awaiting { background: #b07a2a; }
+.bm-status--pending::before, .bm-status-dot--pending { background: #4a6fa5; }
+.bm-status--complete::before, .bm-status-dot--complete { background: var(--accent-text); }
+
+/* ---- Application fields (application-form.js's renderApplicationFieldsHtml) ---- */
 .bm-appform-badge {
   font-family: var(--font-condensed); font-size: 12px; letter-spacing: var(--tracking-label); text-transform: uppercase;
   color: var(--maroon-500); background: color-mix(in srgb, var(--maroon-500) 12%, transparent);
   border-radius: var(--radius-control); padding: 7px var(--space-3); display: inline-block;
 }
-.bm-appform-badge--ok { color: var(--accent-text); background: var(--green-100); }
-.bm-appform-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: var(--space-3); }
-.bm-appform-wide { grid-column: 1 / -1; }
-.bm-appform-member-header { display: flex; align-items: flex-start; gap: var(--space-3); }
-.bm-appform-member-identity { flex: 1; }
-.bm-appform-checkbox-row { display: flex; flex-wrap: wrap; gap: var(--space-4); }
-.bm-appform-health { display: flex; flex-direction: column; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px dashed var(--border-hairline); }
-.bm-appform-textarea { min-height: 70px; resize: vertical; font-family: inherit; }
-.bm-appform-categories { display: flex; flex-direction: column; gap: 6px; }
-.bm-appform-category {
-  border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: var(--space-2) var(--space-3);
-}
-.bm-appform-category summary { cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text-body); }
-.bm-appform-category[open] summary { margin-bottom: var(--space-2); }
-.bm-appform-conditions { display: flex; flex-direction: column; gap: var(--space-2); }
-.bm-appform-condition-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
-.bm-appform-condition-label { font-size: 13px; color: var(--text-body); flex: 1; min-width: 160px; }
-
-/* A List custom field (see appListField) -- one compact input per cell.
-   Scrolls sideways on its own rather than widening the preview pane when a
-   list has more columns than fit. */
-.bm-appform-custom-checkbox { padding: 2px 0; }
-.bm-appform-list-wrap { overflow-x: auto; }
-.bm-appform-list { width: 100%; border-collapse: collapse; font-size: 12px; }
-.bm-appform-list th {
-  text-align: left; font-weight: 500; color: var(--text-caption); padding: 0 4px 4px; white-space: nowrap;
-  border-bottom: 1px solid var(--border-hairline);
-}
-.bm-appform-list td { padding: 3px 2px; }
-.bm-appform-list td .bm-input { min-width: 72px; padding: 5px 7px; font-size: 12px; }
-.bm-appform-list-actions { width: 1%; }
-.bm-appform-list-empty { color: var(--text-caption); padding: 6px 4px; }
-
-/* The Application tab's own top-level categories (Primary member, Spouse,
-   Household, Church, and each member's health, see renderAppCategoryHtml)
-   -- a bigger, more prominent <details> box than the nested condition
-   sub-categories (.bm-appform-category) above, since these ARE the page
-   now rather than something nested inside a member card. */
-.bm-appform-toplevel-category {
-  border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: var(--space-4);
-}
-.bm-appform-toplevel-category + .bm-appform-toplevel-category { margin-top: var(--space-3); }
-.bm-appform-toplevel-category summary {
-  cursor: pointer; font-family: var(--font-condensed); font-size: 13px; letter-spacing: var(--tracking-label);
-  text-transform: uppercase; color: var(--text-caption); font-weight: 500;
-}
-.bm-appform-toplevel-category[open] summary { margin-bottom: var(--space-3); }
-.bm-appform-category-body { display: flex; flex-direction: column; gap: var(--space-3); }
+.bm-appfields-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); }
+.bm-appfields-head .bm-section-label { margin-bottom: 0; }
+.bm-appfields-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.bm-appfields-grid .bm-input, .bm-appfields-grid .bm-select { width: 100%; min-width: 0; }
+.bm-appfields-wide { grid-column: 1 / -1; }
+.bm-appfields-grid .bm-field-row { flex-wrap: nowrap; }
+.bm-appfields-grid .bm-appfields-date { flex: 1; }
+.bm-appfields-caption { color: var(--text-caption); font-size: 12px; margin-left: 4px; }
+.bm-appfields-notes { min-height: 64px; height: auto; resize: vertical; font-family: inherit; }
+.bm-bulk-actions { margin-top: var(--space-3); }
 
 /* Nothing selected. Two shapes (see renderPreviewEmpty): no folder open at
    all keeps the plain centered icon/message (.bm-preview-empty-inner
@@ -869,99 +856,136 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 }
 .bm-api-list-row:hover { border-color: var(--green-300); }
 
-/* Connect-the-dots field mapper (renderApiMappingModal): two scrollable
-   columns sharing one scroll container so an absolutely-positioned <svg>
-   overlay (excluded from the flex layout, since it's position:absolute) can
-   draw lines between row elements in both columns. The svg's own width/
-   height are set in JS (positionMappingConnectors) to the container's full
-   scrollWidth/scrollHeight rather than a CSS percentage -- a percentage
-   would only cover the visible viewport, so lines would vanish the moment
-   you scrolled past the first screenful. Sized close to the app window
-   itself (not a fixed px width) so there's real room for both long field
-   labels and a wide gap between the columns -- the gap is what actually
-   makes the connections readable at a glance instead of a tangle of lines
-   crammed right at the column border. */
-.bm-api-mapping-modal { width: calc(100vw - 80px); max-width: 1400px; height: calc(100vh - 80px); }
-.bm-api-mapping-modal .bm-modal-sub { max-width: none; }
-.bm-api-add-field-scopes { display: inline-flex; flex-wrap: wrap; gap: var(--space-3); margin-left: 4px; }
 .bm-api-import-modal { width: 640px; }
-.bm-api-connector-container {
-  position: relative; display: flex; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  gap: 200px; border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: 0 var(--space-4);
-}
-.bm-api-connector-col { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: var(--space-3) 0; }
-.bm-api-connector-svg { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 1; }
-.bm-api-connector-line { stroke: var(--accent-text); stroke-width: 1.5; }
-/* Both row kinds get the same FIXED height regardless of content -- a
-   connected API row's extra "-> target" line and a long label are truncated
-   with an ellipsis (title="" carries the full text) rather than allowed to
-   wrap, which would otherwise make that row taller than its App-side
-   counterpart. With hundreds of fields, even a few px of per-row drift
-   compounds down the list until same-index rows are nowhere near each
-   other vertically and a line's destination becomes unreadable -- fixed,
-   identical heights on both sides keep the two lists in lockstep instead. */
-.bm-api-field-row {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
-  height: 40px; flex-shrink: 0; padding: 0 var(--space-2); border-radius: var(--radius-control); cursor: pointer;
-  font-size: 13px; color: var(--text-body);
-}
-.bm-api-field-row:hover { background: var(--green-100); }
-.bm-api-field-row.armed { background: var(--green-100); box-shadow: inset 2px 0 0 var(--accent-text); }
-.bm-api-field-text { display: flex; flex-direction: column; justify-content: center; gap: 1px; min-width: 0; overflow: hidden; }
-.bm-api-field-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bm-api-field-row.connected .bm-api-field-label { color: var(--text-heading); font-weight: 500; }
-.bm-api-field-target {
-  display: block; color: var(--accent-text); font-weight: 400; font-size: 12px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.bm-api-field-disconnect {
-  flex-shrink: 0; border: none; background: none; color: var(--text-muted); cursor: pointer;
-  display: flex; padding: 2px; border-radius: var(--radius-control);
-}
-.bm-api-field-disconnect:hover { color: #9c4a3d; }
-.bm-app-field-row {
-  display: flex; align-items: center; gap: var(--space-2); height: 40px; flex-shrink: 0; padding: 0 var(--space-2);
-  border-radius: var(--radius-control); cursor: pointer; font-size: 13px; color: var(--text-body);
-}
-.bm-app-field-row .bm-api-field-label { flex: 1; min-width: 0; }
-.bm-app-field-row:hover { background: var(--green-100); }
-.bm-app-field-row.dragging { opacity: 0.5; }
-.bm-app-field-row.move-armed { background: var(--green-100); box-shadow: inset 2px 0 0 var(--accent-text); }
-.bm-api-drag-handle { cursor: grab; color: var(--text-muted); flex-shrink: 0; user-select: none; }
-.bm-api-add-slot-btn {
-  display: flex; align-items: center; gap: 6px; flex-shrink: 0; border: 1px dashed var(--border-hairline); background: none;
-  color: var(--accent-text); border-radius: var(--radius-control); padding: 10px; font-size: 12.5px; cursor: pointer;
-  width: 100%; justify-content: center; margin-top: var(--space-2);
-}
-.bm-api-add-slot-btn:hover { border-color: var(--accent-text); background: var(--green-100); }
+.bm-mapping-grid { display: flex; flex-direction: column; gap: var(--space-4); }
+.bm-field-hint { font-size: 12px; color: var(--text-caption); }
 
 .bm-api-import-list { display: flex; flex-direction: column; gap: var(--space-2); max-height: 50vh; overflow-y: auto; }
 .bm-api-import-row { justify-content: flex-start; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-hairline); }
 .bm-api-import-name { flex: 1; }
 .bm-api-import-date { font-family: var(--font-condensed); font-size: 11.5px; color: var(--text-caption); }
 
-/* ---- Manage Form Fields modal ---- */
-.bm-manage-fields-modal { width: 640px; max-height: calc(100vh - 80px); }
-.bm-manage-fields-body { gap: var(--space-5); }
-.bm-manage-field-section + .bm-manage-field-section { border-top: 1px solid var(--border-hairline); padding-top: var(--space-3); }
-.bm-manage-field-row {
-  display: flex; align-items: center; gap: var(--space-3); padding: 7px 0; font-size: 13px; color: var(--text-body);
+/* ---- Plans modal (renderPlansModal) ---- */
+.bm-plan-list { display: flex; flex-direction: column; }
+.bm-plan-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-hairline); }
+.bm-plan-row-name { flex: 1; font-size: 14px; font-weight: 500; color: var(--text-body); }
+.bm-plan-row-count { font-size: 12px; color: var(--text-caption); }
+.bm-icon-btn { border: none; background: none; color: var(--text-muted); cursor: pointer; display: flex; padding: 6px; border-radius: var(--radius-control); }
+.bm-icon-btn:hover:not(:disabled) { color: #9c4a3d; background: var(--surface-card-alt); }
+.bm-icon-btn:disabled { opacity: 0.3; cursor: default; }
+.bm-plan-add-row { flex-wrap: nowrap; }
+.bm-plan-add-row .bm-input { flex: 1; min-width: 0; }
+.bm-plan-import { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--border-hairline); }
+
+/* ---- Rail: plans ---- */
+.bm-plan-nav-list { display: flex; flex-direction: column; margin-bottom: var(--space-2); }
+.bm-plan-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.7; flex-shrink: 0; }
+
+/* ---- Grid card: plan + status line ---- */
+.bm-card-app { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+
+/* ---- Toolbar extras shared by the Tracker and Summary views ---- */
+.bm-toolbar-btn { flex-shrink: 0; margin-bottom: 3px; }
+.bm-toolbar-year { width: 120px; flex-shrink: 0; }
+.bm-segmented { display: inline-flex; height: 40px; border: 1px solid var(--border-hairline); border-radius: var(--radius-control); overflow: hidden; }
+.bm-segmented-btn {
+  display: flex; align-items: center; gap: 6px; padding: 0 12px; border: none; background: var(--surface-card);
+  color: var(--text-muted); font-family: var(--font-sans); font-size: 12.5px; cursor: pointer; white-space: nowrap;
 }
-.bm-manage-field-reorder { display: flex; flex-direction: column; flex-shrink: 0; gap: 1px; }
-.bm-manage-field-reorder-btn {
-  display: flex; align-items: center; justify-content: center; width: 20px; height: 14px; padding: 0;
-  border: none; background: none; color: var(--text-muted); cursor: pointer; border-radius: 3px;
+.bm-segmented-btn + .bm-segmented-btn { border-left: 1px solid var(--border-hairline); }
+.bm-segmented-btn:hover:not(.active) { background: var(--surface-card-alt); color: var(--text-body); }
+.bm-segmented-btn.active { background: var(--green-500); color: var(--on-accent); }
+.bm-segmented-count { font-variant-numeric: tabular-nums; opacity: 0.75; font-size: 11.5px; }
+
+/* ---- Tracker view (renderTrackerMain) ---- */
+.bm-tracker-hint { margin: 0 var(--space-6) var(--space-3); font-size: 12.5px; color: var(--text-muted); }
+.bm-tracker-hint .bm-inline-link { font-size: 12.5px; }
+.bm-tracker-wrap { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--space-6); }
+/* Fixed layout so each column keeps its set width (Name takes whatever's
+   left); below min-width the table scrolls sideways instead of squeezing
+   cells. */
+.bm-tracker { width: 100%; min-width: 1300px; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.bm-tracker thead th {
+  position: sticky; top: 0; z-index: 1; background: var(--surface-page); text-align: left; padding: 0;
+  border-bottom: 2px solid var(--border-rule);
 }
-.bm-manage-field-reorder-btn:hover:not(:disabled) { background: var(--green-100); color: var(--accent-text); }
-.bm-manage-field-reorder-btn:disabled { opacity: 0.25; cursor: default; }
-.bm-manage-field-required { flex-shrink: 0; width: 92px; }
-.bm-manage-field-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bm-manage-field-add-row { display: flex; gap: var(--space-2); align-items: center; }
-.bm-manage-field-add-row .bm-input { flex: 1; }
-.bm-manage-field-add-row .bm-select { width: 180px; flex-shrink: 0; }
-.bm-manage-field-type { width: 104px; flex-shrink: 0; padding-top: 4px; padding-bottom: 4px; font-size: 12px; }
-.bm-manage-field-type-fixed { color: var(--text-caption); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bm-api-mapping-notice { margin-bottom: var(--space-3); }
+.bm-tracker-sort {
+  display: flex; align-items: center; gap: 4px; width: 100%; background: none; border: none; cursor: pointer;
+  padding: 8px 6px; font-family: var(--font-condensed); font-size: 12px; letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--text-caption); white-space: nowrap;
+}
+.bm-tracker-sort.active, .bm-tracker-sort:hover { color: var(--accent-text); }
+.bm-tracker td { padding: 3px 4px; border-bottom: 1px solid var(--border-hairline); vertical-align: middle; }
+.bm-tracker tbody tr:hover td { background: var(--surface-card-alt); }
+.bm-tracker-th-plan { width: 84px; }
+.bm-tracker-th-memberId { width: 104px; }
+.bm-tracker-th-entryDate { width: 196px; }
+.bm-tracker-th-startDate { width: 144px; }
+.bm-tracker-th-cardSent { width: 76px; }
+.bm-tracker-th-status { width: 132px; }
+.bm-tracker-th-notes { width: 180px; }
+.bm-tracker-th-file { width: 180px; }
+/* Cells read as plain text until hovered or focused, like a spreadsheet. */
+.bm-cell-input, .bm-cell-select {
+  width: 100%; min-width: 0; height: 30px; padding: 4px 6px; font-family: var(--font-sans); font-size: 13px; color: var(--text-body);
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-control); outline: none;
+}
+.bm-cell-input::placeholder { color: var(--gray-400); font-style: italic; }
+.bm-tracker tr:hover .bm-cell-input, .bm-tracker tr:hover .bm-cell-select { border-color: var(--border-hairline); background: var(--surface-card); }
+.bm-cell-input:focus, .bm-cell-select:focus { border-color: var(--accent-text) !important; background: var(--surface-card) !important; }
+.bm-cell-date { width: 136px; }
+/* A blank date input still draws its mm/dd/yyyy mask, and every date input
+   its calendar button -- both hidden until the row is hovered or the cell
+   focused, so an empty cell reads as empty and a full column isn't a stack
+   of identical icons. */
+.bm-cell-date.is-empty:not(:focus) { color: transparent; }
+.bm-tracker tr:hover .bm-cell-date.is-empty:not(:focus) { color: var(--gray-400); }
+.bm-cell-date::-webkit-calendar-picker-indicator { opacity: 0; cursor: pointer; }
+.bm-tracker tr:hover .bm-cell-date::-webkit-calendar-picker-indicator, .bm-cell-date:focus::-webkit-calendar-picker-indicator { opacity: 0.6; }
+[data-theme="dark"] .bm-cell-date::-webkit-calendar-picker-indicator, [data-theme="midnight"] .bm-cell-date::-webkit-calendar-picker-indicator { filter: invert(1); }
+.bm-cell-date-wrap { display: flex; align-items: center; gap: 4px; }
+.bm-cell-today {
+  flex-shrink: 0; height: 24px; padding: 0 8px; border: 1px solid var(--accent-text); border-radius: var(--radius-control);
+  background: var(--surface-card); color: var(--accent-text); font-family: var(--font-sans); font-size: 11.5px; cursor: pointer;
+}
+.bm-cell-today:hover { background: var(--green-100); }
+.bm-cell-center { text-align: center; }
+.bm-cell-check { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent-text); }
+.bm-cell-file { white-space: nowrap; overflow: hidden; }
+.bm-cell-file-link {
+  background: none; border: none; padding: 0; cursor: pointer; font-family: var(--font-sans); font-size: 12.5px; color: var(--accent-text);
+  max-width: calc(100% - 30px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; text-align: left;
+}
+.bm-cell-file-link:hover { text-decoration: underline; }
+.bm-cell-nofile { font-size: 12px; color: var(--text-caption); vertical-align: middle; }
+.bm-cell-icon { border: none; background: none; color: var(--text-muted); cursor: pointer; padding: 4px; vertical-align: middle; border-radius: var(--radius-control); }
+.bm-cell-icon:hover { color: var(--accent-text); background: var(--green-100); }
+.bm-cell-icon-danger:hover { color: #9c4a3d; background: var(--surface-card-alt); }
+.bm-tracker-footer { padding: var(--space-2) var(--space-6); border-top: 1px solid var(--border-hairline); }
+
+/* ---- Summary view (renderSummaryMain) ---- */
+.bm-summary-note { flex: 1 1 240px; align-self: center; font-size: 12px; color: var(--text-caption); }
+.bm-summary-wrap { flex: 1; min-height: 0; overflow-y: auto; padding: 0 var(--space-6) var(--space-6); display: flex; flex-direction: column; gap: var(--space-7); }
+.bm-summary-title { font-size: 20px; font-weight: 600; color: var(--text-heading); margin: 0 0 var(--space-3); letter-spacing: var(--tracking-tight); }
+.bm-summary-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); margin-bottom: var(--space-5); }
+.bm-summary-tile { border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: var(--space-3) var(--space-4); background: var(--surface-card); }
+.bm-summary-tile-label { display: flex; align-items: center; gap: 6px; font-family: var(--font-condensed); font-size: 12px; letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-caption); }
+.bm-summary-tile-value { font-size: 28px; font-weight: 600; color: var(--text-body); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.bm-summary-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: var(--space-6); }
+.bm-summary-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.bm-summary-table th {
+  text-align: left; font-family: var(--font-condensed); font-size: 12px; letter-spacing: var(--tracking-label); text-transform: uppercase;
+  color: var(--text-caption); font-weight: 500; padding: 6px 8px; border-bottom: 2px solid var(--border-rule); white-space: nowrap;
+}
+.bm-summary-table td { padding: 6px 8px; border-bottom: 1px solid var(--border-hairline); color: var(--text-body); }
+.bm-summary-table tfoot td { font-weight: 600; border-bottom: none; background: var(--surface-card-alt); }
+.bm-summary-table .bm-num { text-align: right; font-variant-numeric: tabular-nums; }
+.bm-summary-table .bm-num-strong { font-weight: 600; }
+.bm-summary-current td:first-child { color: var(--accent-text); font-weight: 600; }
+.bm-summary-bar-col { width: 28%; }
+/* One series (new applications), so no legend: the column header names it.
+   Rounded data end, square at the baseline. */
+.bm-summary-bar { height: 10px; min-width: 3px; background: var(--accent-text); border-radius: 0 4px 4px 0; }
 
 /* ---- Color picker popover ----
    Deliberately NOT themed — kept on a fixed light surface in every theme so

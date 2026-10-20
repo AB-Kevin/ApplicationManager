@@ -68,6 +68,29 @@ function saveViewMode(mode) {
   }
 }
 
+// Which of the main area's tabs (Files/Tracker/Summary) was open last —
+// same cosmetic, renderer-local persistence as viewMode above.
+const MAIN_VIEWS = ["files", "tracker", "summary"];
+function loadMainView() {
+  try {
+    const saved = localStorage.getItem("bm-main-view");
+    return MAIN_VIEWS.includes(saved) ? saved : "files";
+  } catch {
+    return "files";
+  }
+}
+function saveMainView(view) {
+  try {
+    localStorage.setItem("bm-main-view", view);
+  } catch {
+    /* private-mode/storage-disabled — the preference just won't survive restart */
+  }
+}
+
+// state.activePlan's value for "only rows with no plan yet" — can't collide
+// with a real plan name, which is never blank.
+const NO_PLAN = "";
+
 // List-view column widths, same persistence rationale as viewMode above.
 // Keyed by the resizable columns only — thumb/open are fixed, and Name is
 // the flexible remainder (see .bm-list-header/.bm-list-row's shared
@@ -149,28 +172,26 @@ const state = {
   recordingShortcutIdx: null, // index into tagModalDraft currently listening for a keypress
   colorPicker: null, // { idx, h, s, v } — the tag-row color picker popover, or null if closed
   apiConfig: null, // parsed .api-config.json for the open folder, or null if never connected — see main.js's readApiConfig/getApiConfig
-  formSchema: null, // parsed .form-schema.json for the open folder — { removedFields, requiredFields, customFields } — see main.js's readFormSchema/getFormSchema
-  customFieldDefs: [], // formSchema.customFields, or [] — mirrored onto state so application-form.js's renderAdditionalFieldsHtml doesn't need to know about formSchema's other fields
-  manageFieldsModalOpen: false, // see renderManageFieldsModal — required/removed/add-field screen, independent of any API connection
-  manageFieldsDraft: null, // working copy of formSchema while the modal is open
-  manageFieldsNewLabel: "", // add-field form's label input, tracked on state so it survives a re-render triggered by some OTHER action in the modal (toggling a checkbox elsewhere, say)
-  manageFieldsNewScope: "household", // add-field form's scope select
+  plans: [], // plan names for the open folder, from its .plans.json — see main.js's readPlans
+  records: [], // record-only tracker rows (no file behind them), from the folder's .records — see main.js's list-records
+  activePlan: null, // plan filter shared by every view: null = all plans, NO_PLAN = only rows with no plan yet, else a plan name
+  mainView: loadMainView(), // "files" | "tracker" | "summary" — the main area's tab, see renderMainTabsHtml
+  trackerSearch: "",
+  trackerStatus: "all", // "all" or one of STATUSES' keys
+  trackerSort: { key: "entryDate", dir: "desc" }, // see sortTrackerRows
+  summaryYear: new Date().getFullYear(),
+  plansModalOpen: false, // see renderPlansModal
+  plansDraft: null, // working copy of state.plans while that modal is open
+  plansNewName: "",
   apiSetupModalOpen: false, // site URL + consumer key/secret + form picker, see renderApiSetupModal
   apiSetupStep: "credentials", // "credentials" | "pickForm" — which half of the setup modal is showing
   apiSetupDraft: null, // working copy of { siteUrl, consumerKey, consumerSecret, formId } while the setup modal is open
   apiSetupForms: [], // forms list returned by testGfConnection, shown once credentials check out
   apiSetupError: null, // message from a failed testGfConnection call, or null
   apiSetupBusy: false, // true while testGfConnection's request is in flight
-  apiMappingModalOpen: false, // see renderApiMappingModal — a two-column connect-the-dots editor
+  apiMappingModalOpen: false, // see renderApiMappingModal — which online fields feed the record's name/member ID/start date, and which plan imports go to
   apiMappingFields: [], // flattened gf field rows from getGfFormFields, or [] while loading
-  apiMappingConnections: {}, // working { [gfFieldId]: appFieldTarget } map while the mapping modal is open
-  apiMappingArmed: null, // gfFieldId currently "armed" (clicked, awaiting its App-side match), or null
-  apiMappingMoveArmed: null, // App-side row id "armed" to be repositioned (its drag handle was clicked, not dragged) -- scroll anywhere, then click a row to drop it there. Mutually exclusive with apiMappingArmed.
-  apiMappingCustomFields: [], // working copy of formSchema.customFields, grown by addMappingCustomField
-  apiMappingNotice: null, // one-line note about a change openApiMappingModal proposed on its own (e.g. the dependents list), or null
-  apiMappingRemovedFields: [], // working copy of formSchema.removedFields, grown by deleteMappingField — deleting a non-required field's ✕ here is the same permanent delete Manage Form Fields does
-  apiMappingOrder: [], // working copy of formSchema.appFieldOrder — App-side row display order, shared with Manage Form Fields and the real Application tab (see buildAppFieldRows)
-  apiMappingSlotCount: 1, // highest household-member "slot" currently offered (1 = none beyond primary/spouse) — see addMappingHouseholdMemberSlot
+  apiMappingDraft: null, // working { firstName, lastName, memberId, startDate, plan } while the mapping modal is open
   apiMappingBusy: false,
   apiMappingError: null,
   apiImportModalOpen: false, // see renderApiImportModal
@@ -184,13 +205,11 @@ const state = {
   commenterModalOpen: false, // shown unskippably on first launch (no commenterName yet), or on demand from the Options dialog
   commenterNameDraft: "", // working copy of commenterName while the name modal is open
   abAppsName: "", // name of whoever's signed in to AB Apps, if anyone — overrides commenterName when set, see commentSignerName()
-  settingsModalOpen: false, // the rail's "Options" dialog — a home for per-device settings (currently comment name + theme + autoexport folder)
+  settingsModalOpen: false, // the rail's "Options" dialog — a home for per-device settings (currently comment name + theme)
   theme: "system", // "system" | "light" | "dark" | "midnight" — per-device, see main.js's settings.json and resolveTheme()
-  autoexportFolder: "", // per-device absolute folder the Autoexport button files things into — see main.js's settings.json; asked for on first use, changeable from Options
   refreshing: false, // true while re-scanning the folder for changes made outside the app
   loadingInitial: true, // true until the startup last-folder lookup + first scan finishes
   reviewMode: false, // true while review mode's full-size viewer replaces the rail+grid — see enterReviewMode
-  reviewPreviewTab: "application", // "application" | "tagsComments" — which tab review mode's preview pane shows, see renderReviewTabStripHtml; reset to "application" each time enterReviewMode runs, persists across Prev/Next within a session
   reviewCursor: null, // relative path of the file currently shown in review mode
   reviewLastIndex: 0, // index reviewCursor was last found at in getFiltered() — see maybeAdvanceReview
   preReviewSelected: null, // Set snapshot of state.selected from just before review mode started — fallback for exitReviewModeState when there's no reviewCursor file to select instead
@@ -357,6 +376,11 @@ function formatRelativeTime(ms) {
 
 function escapeHtml(str) {
   return String(str).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+// escapeHtml, plus double quotes — for a value going inside an attribute.
+function escapeAttr(str) {
+  return escapeHtml(str ?? "").replace(/"/g, "&quot;");
 }
 
 function extLabel(ext) {
@@ -538,8 +562,16 @@ function getFiltered() {
     .filter((f) => !state.untaggedOnly || f.tags.length === 0)
     .filter((f) => [...state.activeTags].every((t) => f.tags.includes(t)))
     .filter((f) => !state.activeFolder || f.dir === state.activeFolder || f.dir.startsWith(state.activeFolder + "/"))
-    .filter((f) => !state.looseOnly || f.dir === "");
+    .filter((f) => !state.looseOnly || f.dir === "")
+    .filter((f) => recordMatchesPlan(f.appForm));
   return sortFiles(filtered);
+}
+
+// The rail's Plans filter (state.activePlan), shared by the Files, Tracker,
+// and Summary views.
+function recordMatchesPlan(record) {
+  if (state.activePlan === null) return true;
+  return (record.plan || NO_PLAN) === state.activePlan;
 }
 
 async function refreshFiles(skipFocusNudge = false) {
@@ -554,11 +586,13 @@ async function refreshFiles(skipFocusNudge = false) {
     // look like it never happened. Flush the debounce and wait out every pending
     // write first so the read below always reflects the latest edits.
     flushPendingComments();
-    flushPendingAppForms();
+    flushPendingRecordSaves();
     await waitForPendingMetaWrites();
-    [state.files, state.allFolders] = await Promise.all([
+    [state.files, state.allFolders, state.records, state.plans] = await Promise.all([
       window.api.listFiles(state.folder),
       window.api.listFolders(state.folder),
+      window.api.listRecords(state.folder),
+      window.api.getPlans(state.folder),
     ]);
     // Drop any selected paths that no longer exist under this name (moved elsewhere
     // by this same action, deleted, or changed outside the app) rather than leaving
@@ -569,6 +603,7 @@ async function refreshFiles(skipFocusNudge = false) {
     });
   } finally {
     state.refreshing = false;
+    lastRefreshAt = Date.now();
   }
   render();
   // Works around a Windows/Chromium quirk where rebuilding the DOM (just done by
@@ -587,12 +622,27 @@ async function refreshFiles(skipFocusNudge = false) {
 // reload would otherwise clobber an in-progress tag-manager edit or comment
 // being typed, since the reload's data reflects disk, not whatever's mid-edit.
 const AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+// Coming back to the window after a while also rescans — on the shared
+// OneDrive folder, that's when coworkers' edits are most likely to have
+// landed. Throttled, since refreshFiles' own focus nudge (and plain
+// alt-tabbing) fires focus events constantly.
+const FOCUS_REFRESH_MIN_GAP_MS = 60 * 1000;
+let lastRefreshAt = 0;
+
+function backgroundRefreshAllowed() {
+  if (!state.folder || state.refreshing || state.tagModalOpen || state.plansModalOpen) return false;
+  return !isEditableTarget(document.activeElement);
+}
 
 setInterval(() => {
-  if (!state.folder || state.refreshing || state.tagModalOpen) return;
-  if (isEditableTarget(document.activeElement)) return;
+  if (!backgroundRefreshAllowed()) return;
   refreshFiles(true); // skipFocusNudge — this isn't a user-initiated action, so it shouldn't blur/refocus the window
 }, AUTO_REFRESH_INTERVAL_MS);
+
+window.addEventListener("focus", () => {
+  if (!backgroundRefreshAllowed() || Date.now() - lastRefreshAt < FOCUS_REFRESH_MIN_GAP_MS) return;
+  refreshFiles(true);
+});
 
 async function chooseFolder() {
   const folder = await window.api.selectFolder();
@@ -613,11 +663,12 @@ async function openFolder(folder, isStartup = false) {
   state.untaggedOnly = false;
   state.looseOnly = false;
   state.search = "";
+  state.activePlan = null;
+  state.trackerSearch = "";
+  state.trackerStatus = "all";
   undoStack = []; // entries close over paths in the previous folder — discard them
   state.predefinedTags = await window.api.getTagConfig(folder);
   state.apiConfig = await window.api.getApiConfig(folder);
-  state.formSchema = await window.api.getFormSchema(folder);
-  state.customFieldDefs = state.formSchema?.customFields || [];
   window.api.setLastFolder(folder);
   await refreshFiles(isStartup);
 }
@@ -684,45 +735,170 @@ function flushPendingComments() {
   Object.keys(commentDebounce).forEach((idx) => flushComment(idx));
 }
 
-// ---- Application review form autosave (see application-form.js) ----
-// One save call writes the whole per-file JSON sidecar at once (unlike
-// comments, which persist one array field), keyed here by file.path so
-// stepping between files in review mode never mixes up which file's timer
-// is pending. Same debounce-then-flush-on-blur/nav shape as
-// updateComment/flushComment above, plus an immediate (non-debounced) path
-// for discrete checkbox/select changes, which don't need to wait out a
-// typing pause.
-const appFormDebounce = {};
+// ---- Application records (see application-form.js) ----
+// A tracker "row" is one record plus where it's stored: { key, record,
+// file } — `file` is the application file whose sidecar holds the record,
+// or null for a record-only row (state.records, see main.js's
+// list-records). Every edit — the preview pane's Application fields, a
+// Tracker cell, a bulk change from the multi-select pane — goes through
+// setRecordFields/wireRecordTextInput below, so they all save and undo the
+// same way.
 
-function saveAppForm(file) {
-  file.appForm.meta.updatedAt = new Date().toISOString();
-  file.appForm.meta.lastEditedBy = commentSignerName() || "Unknown";
-  const promise = window.api.saveAppForm(state.folder, file.path, file.appForm);
+function rowForFile(file) {
+  return { key: `f:${file.path}`, record: file.appForm, file };
+}
+
+function rowForRecord(record) {
+  return { key: `r:${record.id}`, record, file: null };
+}
+
+function allRows() {
+  return [...state.files.map(rowForFile), ...state.records.map(rowForRecord)];
+}
+
+// Same in-flight tracking as saveFileMeta, so a refresh can't race ahead of
+// this write.
+function trackWrite(promise) {
   pendingMetaWrites.add(promise);
   const forget = () => pendingMetaWrites.delete(promise);
   promise.then(forget, forget);
   return promise;
 }
 
-function scheduleAppFormSave(file) {
-  const key = file.path;
-  if (appFormDebounce[key]) clearTimeout(appFormDebounce[key].timer);
-  appFormDebounce[key] = {
-    timer: setTimeout(() => flushAppForm(key), 400),
-    flush: () => saveAppForm(file),
+// Where a row's record is written — plain values, so an undo closure still
+// points at the right place after a refresh has replaced the row objects.
+function rowTarget(row) {
+  return { file: row.file ? row.file.path : null, id: row.record.id || null, label: row.record.name || (row.file ? row.file.name : "this row") };
+}
+
+// Saves just the fields in `patch`, merged on disk into whatever the record
+// holds right now (see main.js's mergeRecordPatch) — the folder is shared,
+// and someone else may have changed another field of the same application
+// since this window loaded it.
+function patchTarget(target, patch) {
+  const editor = commentSignerName() || "Unknown";
+  return trackWrite(
+    target.file
+      ? window.api.patchAppForm(state.folder, target.file, patch, editor)
+      : window.api.patchRecord(state.folder, target.id, patch, editor)
+  );
+}
+
+// A save that still fails after main.js's own retries (a file locked for
+// longer than a moment, or a row/file someone else just deleted or moved)
+// is reported rather than lost quietly, and the view resyncs with disk.
+function reportSaveError(target, e) {
+  const msg = String((e && e.message) || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
+  alert(`Couldn't save changes to "${target.label}":\n${msg}`);
+  refreshFiles();
+}
+
+// Takes the merged record back from disk, picking up anyone else's edits to
+// the row's other fields — except a field with a keystroke save still
+// pending, whose newer value is the one on screen.
+function patchRow(row, patch) {
+  const target = rowTarget(row);
+  return patchTarget(target, patch).then(
+    (merged) => {
+      if (!merged) return;
+      for (const [key, value] of Object.entries(merged)) {
+        if (!recordSaveDebounce[`${row.key}|${key}`]) row.record[key] = value;
+      }
+    },
+    (e) => reportSaveError(target, e)
+  );
+}
+
+// An undo puts back just the fields the action changed — not a whole stale
+// copy of the record over whatever else has happened to it since.
+function snapshotFields(row, keys) {
+  return { target: rowTarget(row), data: Object.fromEntries(keys.map((k) => [k, row.record[k]])) };
+}
+
+function restoreSnapshots(snaps) {
+  return Promise.all(snaps.map((s) => patchTarget(s.target, s.data)));
+}
+
+// A discrete change (a date, a select, a checkbox, a "Today" click): saved
+// right away as one undo step.
+function setRecordFields(row, patch, label = "Edit application") {
+  const snap = snapshotFields(row, Object.keys(patch));
+  Object.assign(row.record, patch);
+  patchRow(row, patch);
+  pushUndo(label, () => restoreSnapshots([snap]));
+}
+
+// The card's sent date is recorded automatically — the checkbox is all
+// anyone has to touch.
+function setCardSent(row, checked) {
+  setRecordFields(row, { cardSent: checked, cardSentDate: checked ? todayIso() : "" }, checked ? "Mark card sent" : "Mark card not sent");
+}
+
+// The multi-select pane's equivalent: one patch to every selected file's
+// record, one undo step for the lot.
+function setRecordFieldsForFiles(files, patch, label) {
+  if (files.length === 0) return;
+  const rows = files.map(rowForFile);
+  const snaps = rows.map((row) => snapshotFields(row, Object.keys(patch)));
+  rows.forEach((row) => {
+    Object.assign(row.record, patch);
+    patchRow(row, patch);
+  });
+  pushUndo(label, () => restoreSnapshots(snaps));
+}
+
+// Text fields save as you type (debounced, keyed by row + field so stepping
+// between files never mixes up whose timer is pending) and become one undo
+// step per focus-to-blur, same shape as updateComment/flushComment above.
+// No render() while typing — nothing else on screen depends on a text field
+// mid-edit, and the blur's pushUndo re-renders once it's done.
+const recordSaveDebounce = {};
+
+function scheduleRowSave(row, field, value) {
+  const key = `${row.key}|${field}`;
+  if (recordSaveDebounce[key]) clearTimeout(recordSaveDebounce[key].timer);
+  recordSaveDebounce[key] = {
+    timer: setTimeout(() => flushRowSave(key), 400),
+    flush: () => patchRow(row, { [field]: value }),
   };
 }
 
-function flushAppForm(key) {
-  const pending = appFormDebounce[key];
+function flushRowSave(key) {
+  const pending = recordSaveDebounce[key];
   if (!pending) return;
   clearTimeout(pending.timer);
-  delete appFormDebounce[key];
+  delete recordSaveDebounce[key];
   pending.flush();
 }
 
-function flushPendingAppForms() {
-  Object.keys(appFormDebounce).forEach((key) => flushAppForm(key));
+function flushPendingRecordSaves() {
+  Object.keys(recordSaveDebounce).forEach((key) => flushRowSave(key));
+}
+
+const RECORD_FIELD_LABELS = { name: "name", memberId: "member ID", notes: "notes" };
+
+function wireRecordTextInput(input, row, field) {
+  let before = null;
+  input.addEventListener("focus", () => {
+    before = snapshotFields(row, [field]);
+  });
+  input.addEventListener("input", () => {
+    row.record[field] = input.value;
+    scheduleRowSave(row, field, input.value);
+  });
+  input.addEventListener("blur", () => {
+    flushRowSave(`${row.key}|${field}`);
+    const snap = before;
+    before = null;
+    if (!snap || snap.data[field] === input.value) return;
+    pushUndo(`Edit ${RECORD_FIELD_LABELS[field] || field}`, () => restoreSnapshots([snap]));
+  });
+  // Enter commits a single-line cell the way a spreadsheet does.
+  if (input.tagName === "INPUT") {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") input.blur();
+    });
+  }
 }
 
 // Captured when a comment textarea gains focus (see renderPreview), keyed by
@@ -934,99 +1110,6 @@ async function autorenameSelected() {
   if (errors.length > 0) {
     alert(
       `Renamed ${moved.length} of ${paths.length} file(s). ${errors.length} failed:\n\n` +
-        errors.map((e) => `• ${e.path}: ${e.error}`).join("\n")
-    );
-  }
-}
-
-// Persists a newly chosen autoexport folder to per-device settings (see
-// main.js's settings.json) and updates state immediately — same optimistic-
-// update-then-persist order as setTheme.
-async function setAutoexportFolder(folder) {
-  state.autoexportFolder = folder;
-  render();
-  await window.api.setAutoexportFolder(folder);
-}
-
-// Resolves the per-device autoexport destination folder, asking the user to
-// choose one via the native OS folder picker the first time the Autoexport
-// button is used and remembering it from then on (also reachable from the
-// Options dialog's "Change" button to update it later). Returns null if
-// there's no folder set yet and the user cancels the picker, so callers can
-// bail out cleanly instead of exporting nowhere.
-async function ensureAutoexportFolder() {
-  if (state.autoexportFolder) return state.autoexportFolder;
-  const chosen = await window.api.selectFolder();
-  if (!chosen) return null;
-  await setAutoexportFolder(chosen);
-  return chosen;
-}
-
-// Autoexports every selected file: a "Save As", not a Save — it writes the
-// file under a fresh yyyyMMdd_HHmmss name (same naming scheme as Autorename)
-// into the per-device autoexport folder (see ensureAutoexportFolder) and
-// leaves the original completely untouched in the catalog. The exported copy
-// is always a PDF — a JPG/PNG source gets wrapped into one on the main-
-// process side (see writeAutoexportCopy in main.js) — so autoexporting a
-// mix of scans and photos still produces a folder of nothing but PDFs.
-// Selection is left as-is since nothing about the original file changed.
-// Undo simply deletes the copy that was created — there's nothing to
-// restore, since the original was never moved or renamed.
-async function autoexportSelected() {
-  const files = getSelectedFiles();
-  if (files.length === 0 || !state.folder) return;
-  const destFolder = await ensureAutoexportFolder();
-  if (!destFolder) return;
-
-  if (files.length === 1) {
-    const file = files[0];
-    const prevName = file.name;
-    try {
-      const result = await window.api.autoexportFile(state.folder, file.path, destFolder);
-      if (result && result.error) {
-        alert(result.error);
-        return;
-      }
-      const destFull = result.destFull;
-      pushUndo(`Autoexport "${prevName}"`, async () => {
-        const r = await window.api.undoAutoexport(destFull);
-        if (r && r.error) throw new Error(r.error);
-      });
-    } catch (e) {
-      alert(`Couldn't autoexport "${prevName}": ${e.message || e}`);
-    } finally {
-      // Only matters if destFolder happens to be inside the catalog folder —
-      // otherwise nothing about the listing changed, and this is a no-op.
-      await refreshFiles();
-    }
-    return;
-  }
-
-  const paths = files.map((f) => f.path);
-  let saved = [];
-  let errors = [];
-  try {
-    const result = await window.api.autoexportFiles(state.folder, paths, destFolder);
-    saved = (result && result.saved) || [];
-    errors = (result && result.errors) || [];
-  } catch (e) {
-    errors = paths.map((p) => ({ path: p, error: e.message || String(e) }));
-  } finally {
-    await refreshFiles();
-  }
-  if (saved.length > 0) {
-    pushUndo(`Autoexport ${saved.length} files`, async () => {
-      const errs = [];
-      for (const { source, destFull } of saved) {
-        const r = await window.api.undoAutoexport(destFull);
-        if (r && r.error) errs.push(`${source}: ${r.error}`);
-      }
-      if (errs.length > 0) throw new Error(`Some copies couldn't be undone:\n${errs.join("\n")}`);
-    });
-  }
-  if (errors.length > 0) {
-    alert(
-      `Autoexported ${saved.length} of ${paths.length} file(s). ${errors.length} failed:\n\n` +
         errors.map((e) => `• ${e.path}: ${e.error}`).join("\n")
     );
   }
@@ -1399,7 +1482,7 @@ document.addEventListener("keydown", (e) => {
   if (isEditableTarget(document.activeElement)) return;
   const combo = comboFromEvent(e);
   if (combo !== "Ctrl+A" && combo !== "Cmd+A") return;
-  if (!state.folder || state.reviewMode || state.tagModalOpen || state.aboutOpen || state.colorPicker || state.commenterModalOpen || state.settingsModalOpen || state.apiSetupModalOpen || state.apiMappingModalOpen || state.apiImportModalOpen || state.manageFieldsModalOpen) return;
+  if (!state.folder || state.reviewMode || state.tagModalOpen || state.aboutOpen || state.colorPicker || state.commenterModalOpen || state.settingsModalOpen || state.apiSetupModalOpen || state.apiMappingModalOpen || state.apiImportModalOpen || state.plansModalOpen || state.mainView !== "files") return;
   e.preventDefault();
   const filtered = getFiltered();
   if (filtered.length === 0) return;
@@ -1425,6 +1508,8 @@ document.addEventListener("keydown", (e) => {
   else if (state.aboutOpen) closeAbout();
   else if (state.commenterModalOpen) closeCommenterNameModal();
   else if (state.settingsModalOpen) closeSettingsModal();
+  else if (state.plansModalOpen) closePlansModal();
+  else if (state.apiMappingModalOpen) closeApiMappingModal();
   else if (state.reviewMode) exitReviewMode();
 });
 
@@ -1433,6 +1518,7 @@ document.addEventListener("keydown", (e) => {
 // it from all of them; otherwise it adds it to whichever ones are missing it.
 document.addEventListener("keydown", (e) => {
   if (state.tagModalOpen || isEditableTarget(document.activeElement)) return;
+  if (state.mainView !== "files" && !state.reviewMode) return; // the selection isn't on screen in the Tracker/Summary views
   const files = getSelectedFiles();
   if (files.length === 0 || state.predefinedTags.length === 0) return;
   const combo = comboFromEvent(e);
@@ -1484,7 +1570,7 @@ document.addEventListener("keydown", (e) => {
   if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
   if (isEditableTarget(document.activeElement)) return;
   if (state.reviewMode) return; // the grid isn't even on screen — see the review-mode arrow handler below instead
-  if (state.tagModalOpen || state.aboutOpen || state.colorPicker || state.commenterModalOpen || state.settingsModalOpen || state.recordingShortcutIdx !== null || state.apiSetupModalOpen || state.apiMappingModalOpen || state.apiImportModalOpen || state.manageFieldsModalOpen) return;
+  if (state.tagModalOpen || state.aboutOpen || state.colorPicker || state.commenterModalOpen || state.settingsModalOpen || state.recordingShortcutIdx !== null || state.apiSetupModalOpen || state.apiMappingModalOpen || state.apiImportModalOpen || state.plansModalOpen || state.mainView !== "files") return;
   const filtered = getFiltered();
   if (filtered.length === 0) return;
 
@@ -1545,7 +1631,6 @@ function enterReviewMode() {
   state.preReviewSelected = new Set(state.selected);
   state.preReviewAnchor = state.selectAnchor;
   state.reviewMode = true;
-  state.reviewPreviewTab = "application";
   // Start from whatever's currently selected (navCursor tracks the most
   // recent click/arrow-nav target, selectAnchor a plain/ctrl-click without
   // subsequent arrow nav) if it's still in the filtered list, else the top.
@@ -1582,7 +1667,7 @@ function exitReviewModeState() {
 }
 
 function exitReviewMode() {
-  flushPendingAppForms();
+  flushPendingRecordSaves();
   flushPendingComments();
   const exitedPath = state.reviewCursor;
   exitReviewModeState();
@@ -1605,7 +1690,7 @@ function setReviewCursorState(path) {
 // filtered order, never touching the file's tags/folder/etc.
 function reviewStep(dir) {
   if (!state.reviewMode) return;
-  flushPendingAppForms();
+  flushPendingRecordSaves();
   flushPendingComments();
   const filtered = getFiltered();
   const idx = filtered.findIndex((f) => f.path === state.reviewCursor);
@@ -1679,7 +1764,7 @@ let liveReviewPlate = null;
 // the render this way, false if the caller still needs to do a full rebuild
 // (entering review mode, stepping to another file, or exiting it).
 function updateReviewInPlace() {
-  if (state.tagModalOpen || state.aboutOpen || state.settingsModalOpen || state.commenterModalOpen) return false;
+  if (state.tagModalOpen || state.aboutOpen || state.settingsModalOpen || state.commenterModalOpen || state.plansModalOpen) return false;
   if (!liveReviewPlate) return false;
   const plateEl = document.getElementById("review-plate");
   if (!plateEl) return false;
@@ -1781,17 +1866,12 @@ function render() {
   const gridScrollTop = prevGridWrap ? prevGridWrap.scrollTop : 0;
   const prevRailScroll = document.querySelector(".bm-rail-scroll");
   const railScrollTop = prevRailScroll ? prevRailScroll.scrollTop : 0;
-  // Same reasoning, for the API field mapper's connector list -- with a form
-  // that has hundreds of fields, almost every click (connect/disconnect/
-  // reorder/add slot) would otherwise reset the reviewer all the way back
-  // to the top of a long scroll.
-  const prevMappingContainer = document.getElementById("api-mapping-container");
-  const mappingScrollTop = prevMappingContainer ? prevMappingContainer.scrollTop : 0;
-  // Same reasoning, for Manage Form Fields -- required/delete/reorder all
-  // re-render the whole modal, which would otherwise snap a long field list
-  // back to the top on every single click.
-  const prevManageFieldsBody = document.getElementById("manage-fields-body");
-  const manageFieldsScrollTop = prevManageFieldsBody ? prevManageFieldsBody.scrollTop : 0;
+  // Same reasoning, for the Tracker table and the Summary view -- every
+  // cell edit re-renders, which would otherwise jump back to the first row.
+  const prevTrackerWrap = document.getElementById("tracker-wrap");
+  const trackerScrollTop = prevTrackerWrap ? prevTrackerWrap.scrollTop : 0;
+  const prevSummaryWrap = document.getElementById("summary-wrap");
+  const summaryScrollTop = prevSummaryWrap ? prevSummaryWrap.scrollTop : 0;
   // Same reasoning, for the preview pane's own scroll region (the
   // application form/tags/comments -- see .bm-preview-scroll in
   // renderPreviewSingle). A long application form otherwise loses its scroll
@@ -1824,7 +1904,10 @@ function render() {
     app.appendChild(renderLoadingScreen());
     return;
   }
-  const body = el(`<div class="bm-body${state.reviewMode ? " bm-body-review" : ""}"></div>`);
+  // The Tracker and Summary views need the room the preview pane would
+  // take — a selected file's details don't apply to them anyway.
+  const wideView = !state.reviewMode && state.folder && state.mainView !== "files";
+  const body = el(`<div class="bm-body${state.reviewMode ? " bm-body-review" : ""}${wideView ? " bm-body-wide" : ""}"></div>`);
   if (state.reviewMode) {
     body.style.setProperty("--review-preview-width", `${state.reviewPreviewWidth}px`);
     body.appendChild(renderReviewMain());
@@ -1835,8 +1918,12 @@ function render() {
     body.appendChild(renderRail());
     body.appendChild(renderMain());
   }
-  body.appendChild(renderPreview());
+  if (!wideView) body.appendChild(renderPreview());
   app.appendChild(body);
+  const newTrackerWrap = document.getElementById("tracker-wrap");
+  if (newTrackerWrap) newTrackerWrap.scrollTop = trackerScrollTop;
+  const newSummaryWrap = document.getElementById("summary-wrap");
+  if (newSummaryWrap) newSummaryWrap.scrollTop = summaryScrollTop;
   const newGridWrap = document.getElementById("grid-wrap");
   if (newGridWrap) newGridWrap.scrollTop = gridScrollTop;
   const newRailScroll = document.querySelector(".bm-rail-scroll");
@@ -1854,20 +1941,9 @@ function render() {
   if (state.settingsModalOpen) app.appendChild(renderSettingsModal());
   if (state.commenterModalOpen) app.appendChild(renderCommenterNameModal());
   if (state.apiSetupModalOpen) app.appendChild(renderApiSetupModal());
-  if (state.apiMappingModalOpen) {
-    app.appendChild(renderApiMappingModal());
-    const newMappingContainer = document.getElementById("api-mapping-container");
-    if (newMappingContainer) newMappingContainer.scrollTop = mappingScrollTop;
-    // Needs real layout (getBoundingClientRect), same reasoning as the color
-    // popover above — only makes sense once the overlay is actually attached.
-    positionMappingConnectors();
-  }
+  if (state.apiMappingModalOpen) app.appendChild(renderApiMappingModal());
   if (state.apiImportModalOpen) app.appendChild(renderApiImportModal());
-  if (state.manageFieldsModalOpen) {
-    app.appendChild(renderManageFieldsModal());
-    const newManageFieldsBody = document.getElementById("manage-fields-body");
-    if (newManageFieldsBody) newManageFieldsBody.scrollTop = manageFieldsScrollTop;
-  }
+  if (state.plansModalOpen) app.appendChild(renderPlansModal());
   restoreFocus(focusInfo);
 }
 
@@ -2076,11 +2152,26 @@ function renderRailFooter() {
   return footer;
 }
 
+// Counts for the rail's Plans list: every application file and record-only
+// row in total, per plan, and with no plan yet (where a fresh scan sits
+// until someone assigns it).
+function railPlanCounts() {
+  const rows = allRows();
+  const named = rows.filter((r) => r.record.plan);
+  const extra = [...new Set(named.map((r) => r.record.plan))].filter((p) => !state.plans.includes(p)); // a plan since removed from the list, still on some rows
+  return {
+    all: rows.length,
+    plans: [...state.plans, ...extra].map((name) => ({ name, count: named.filter((r) => r.record.plan === name).length })),
+    none: rows.filter((r) => !r.record.plan).length,
+  };
+}
+
 function renderRail() {
   const tags = getAllTags();
   const folderTree = state.folder ? buildFolderTree(state.files) : null;
   const untaggedCount = state.files.filter((f) => f.tags.length === 0).length;
   const looseCount = state.files.filter((f) => f.dir === "").length;
+  const planCounts = railPlanCounts();
   const rail = el(`
     <aside class="bm-rail">
       <div class="bm-rail-brand">
@@ -2102,6 +2193,29 @@ function renderRail() {
         ${
           state.folder
             ? `
+        <div class="bm-rail-label-row">
+          <div class="bm-rail-label">Plans</div>
+          <button class="bm-rail-link" id="manage-plans-btn" title="Add or remove plans, or import the old tracker spreadsheet">Manage</button>
+        </div>
+        <div class="bm-plan-nav-list">
+          <div class="bm-nav-item ${state.activePlan === null ? "active" : ""}" data-plan-filter="__all__">
+            <span class="bm-nav-name"><span class="bm-nav-name-text">All plans</span></span>
+            <span class="bm-nav-count">${planCounts.all}</span>
+          </div>
+          ${planCounts.plans
+            .map(
+              (p) => `
+          <div class="bm-nav-item ${state.activePlan === p.name ? "active" : ""}" data-plan-filter="${escapeAttr(p.name)}">
+            <span class="bm-nav-name"><span class="bm-plan-dot"></span><span class="bm-nav-name-text">${escapeHtml(p.name)}</span></span>
+            <span class="bm-nav-count">${p.count}</span>
+          </div>`
+            )
+            .join("")}
+          <div class="bm-nav-item dim ${state.activePlan === NO_PLAN ? "active" : ""}" data-plan-filter="${NO_PLAN}">
+            <span class="bm-nav-name"><span class="bm-nav-name-text">No plan</span></span>
+            <span class="bm-nav-count">${planCounts.none}</span>
+          </div>
+        </div>
         <div class="bm-rail-label">Folders</div>
         <div class="bm-nav-item ${state.activeTags.size === 0 && !state.activeFolder && !state.untaggedOnly && !state.looseOnly ? "active" : ""}" id="nav-all">
           <span class="bm-nav-name">${ICONS.folder}<span class="bm-nav-name-text">All files</span></span>
@@ -2139,17 +2253,14 @@ function renderRail() {
                   .join("")
           }
         </div>
-        <div class="bm-rail-label-row">
-          <div class="bm-rail-label">Application Form</div>
-          <button class="bm-rail-link" id="manage-fields-btn" title="Add, delete, require, or reorder fields on the Application tab">Manage fields</button>
-        </div>
-        <div class="bm-rail-label-row">
+        <div class="bm-rail-label-row bm-rail-label-row-wrap">
           <div class="bm-rail-label">Online Applications</div>
           ${
             state.apiConfig
               ? `<span class="bm-rail-link-group">
                   <button class="bm-rail-link" id="api-import-btn" title="Check the API for new submissions">Import</button>
-                  <button class="bm-rail-link" id="api-settings-btn" title="Edit the API connection or field mapping">Settings</button>
+                  <button class="bm-rail-link" id="api-mapping-btn" title="Which online fields fill in the name, member ID, and start date, and which plan imports go to">Mapping</button>
+                  <button class="bm-rail-link" id="api-settings-btn" title="Edit the API connection">Settings</button>
                 </span>`
               : `<button class="bm-rail-link" id="api-connect-btn" title="Connect to your Gravity Forms API">Connect</button>`
           }
@@ -2165,8 +2276,17 @@ function renderRail() {
   if (refreshBtn) refreshBtn.addEventListener("click", refreshFiles);
   const manageBtn = rail.querySelector("#manage-tags-btn");
   if (manageBtn) manageBtn.addEventListener("click", openTagManager);
-  const manageFieldsBtn = rail.querySelector("#manage-fields-btn");
-  if (manageFieldsBtn) manageFieldsBtn.addEventListener("click", openManageFieldsModal);
+  const managePlansBtn = rail.querySelector("#manage-plans-btn");
+  if (managePlansBtn) managePlansBtn.addEventListener("click", openPlansModal);
+  rail.querySelectorAll("[data-plan-filter]").forEach((elm) => {
+    elm.addEventListener("click", () => {
+      const value = elm.dataset.planFilter;
+      state.activePlan = value === "__all__" || state.activePlan === value ? null : value;
+      render();
+    });
+  });
+  const apiMappingBtn = rail.querySelector("#api-mapping-btn");
+  if (apiMappingBtn) apiMappingBtn.addEventListener("click", openApiMappingModal);
   const apiConnectBtn = rail.querySelector("#api-connect-btn");
   if (apiConnectBtn) apiConnectBtn.addEventListener("click", openApiSetupModal);
   const apiImportBtn = rail.querySelector("#api-import-btn");
@@ -2211,9 +2331,46 @@ function renderRail() {
 }
 
 function renderMain() {
+  if (state.folder && state.mainView === "tracker") return renderTrackerMain();
+  if (state.folder && state.mainView === "summary") return renderSummaryMain();
+  return renderFilesMain();
+}
+
+// The Files / Tracker / Summary tab strip across the top of the main area.
+function renderMainTabsHtml() {
+  if (!state.folder) return "";
+  const tabs = [
+    { key: "files", label: "Files" },
+    { key: "tracker", label: "Tracker" },
+    { key: "summary", label: "Summary" },
+  ];
+  return `
+    <div class="bm-main-tabs" role="tablist">
+      ${tabs.map((t) => `<button class="bm-main-tab${state.mainView === t.key ? " active" : ""}" data-main-view="${t.key}" role="tab">${t.label}</button>`).join("")}
+      ${state.activePlan !== null ? `<span class="bm-main-tabs-scope">${state.activePlan === NO_PLAN ? "No plan" : escapeHtml(state.activePlan)}</span>` : ""}
+    </div>`;
+}
+
+function setMainView(view) {
+  if (view === state.mainView) return;
+  flushPendingRecordSaves();
+  flushPendingComments();
+  state.mainView = view;
+  saveMainView(view);
+  render();
+}
+
+function wireMainTabs(main) {
+  main.querySelectorAll("[data-main-view]").forEach((btn) => {
+    btn.addEventListener("click", () => setMainView(btn.dataset.mainView));
+  });
+}
+
+function renderFilesMain() {
   const filtered = state.folder ? getFiltered() : [];
   const main = el(`
     <main class="bm-main">
+      ${renderMainTabsHtml()}
       <div class="bm-toolbar">
         <button class="bm-btn bm-btn-primary bm-btn-sm bm-toolbar-review" id="review-mode-btn" ${state.folder && filtered.length > 0 ? "" : "disabled"}
           title="${filtered.length > 0 ? "Step through these files one at a time in a focused, full-size view" : "Nothing to review"}">
@@ -2274,6 +2431,7 @@ function renderMain() {
     </main>
   `);
 
+  wireMainTabs(main);
   main.querySelector("#review-mode-btn").addEventListener("click", enterReviewMode);
   const searchInput = main.querySelector("#search-input");
   searchInput.addEventListener("input", (e) => {
@@ -2313,6 +2471,441 @@ function renderMain() {
 
   renderRuleRowInto(main, filtered);
   renderGridInto(main.querySelector("#grid-wrap"), filtered);
+  return main;
+}
+
+// ---- Tracker view ----
+// The old Member Tracker spreadsheet, live: one row per application (file-
+// backed or record-only, see rowForFile/rowForRecord) in the plan the rail
+// has selected, every cell editable in place through the same
+// setRecordFields/wireRecordTextInput path the preview pane uses.
+
+const TRACKER_COLUMNS = [
+  { key: "plan", label: "Plan" },
+  { key: "name", label: "Name" },
+  { key: "memberId", label: "Member ID" },
+  { key: "entryDate", label: "Entry date", defaultDir: "desc" },
+  { key: "startDate", label: "Start date", defaultDir: "desc" },
+  { key: "cardSent", label: "Card sent" },
+  { key: "status", label: "Status" },
+  { key: "notes", label: "Notes" },
+  { key: "file", label: "File" },
+];
+
+// Rows in the rail's plan scope. Under "All plans", an application file
+// that hasn't been given a plan yet is left out — it isn't tracked until
+// someone assigns it one (the "No plan" filter is where those are found);
+// a record-only row was added on purpose, so it always counts.
+function trackerRowsInScope() {
+  return allRows().filter((row) => (state.activePlan === null ? !!row.record.plan || !row.file : recordMatchesPlan(row.record)));
+}
+
+function trackerFilteredRows() {
+  const q = state.trackerSearch.trim().toLowerCase();
+  const rows = trackerRowsInScope().filter((row) => {
+    if (state.trackerStatus !== "all" && recordStatus(row.record) !== state.trackerStatus) return false;
+    if (!q) return true;
+    const r = row.record;
+    return [r.name, r.memberId, r.notes, row.file && row.file.name].some((s) => s && String(s).toLowerCase().includes(q));
+  });
+  return sortTrackerRows(rows);
+}
+
+const TRACKER_STATUS_ORDER = { awaiting: 0, pending: 1, complete: 2 };
+
+function sortTrackerRows(rows) {
+  const { key, dir } = state.trackerSort;
+  const dm = dir === "desc" ? -1 : 1;
+  const text = (s) => String(s || "").toLowerCase();
+  const value = (row) => {
+    const r = row.record;
+    if (key === "entryDate" || key === "startDate") return r[key] || "9999-99-99"; // blank (not entered yet) sorts as newest
+    if (key === "cardSent") return r.cardSent ? 1 : 0;
+    if (key === "status") return TRACKER_STATUS_ORDER[recordStatus(r)];
+    if (key === "file") return text(row.file ? row.file.name : "");
+    if (key === "name") return text(r.name || (row.file ? row.file.name : ""));
+    return text(r[key]);
+  };
+  return [...rows].sort((a, b) => {
+    const va = value(a);
+    const vb = value(b);
+    const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+    return dm * cmp || text(a.record.name).localeCompare(text(b.record.name));
+  });
+}
+
+function setTrackerSort(key) {
+  const col = TRACKER_COLUMNS.find((c) => c.key === key);
+  if (state.trackerSort.key === key) state.trackerSort = { key, dir: state.trackerSort.dir === "asc" ? "desc" : "asc" };
+  else state.trackerSort = { key, dir: (col && col.defaultDir) || "asc" };
+  render();
+}
+
+// `selected` null means nothing is selected (a multi-selection with mixed
+// plans, which supplies its own placeholder option).
+function planOptionsHtml(selected) {
+  const plans = [...state.plans];
+  if (selected && !plans.includes(selected)) plans.push(selected);
+  return `<option value="" ${selected === NO_PLAN ? "selected" : ""}>No plan</option>${plans
+    .map((p) => `<option value="${escapeAttr(p)}" ${selected === p ? "selected" : ""}>${escapeHtml(p)}</option>`)
+    .join("")}`;
+}
+
+function trackerCellId(row, field) {
+  return `trk:${row.key}:${field}`;
+}
+
+function renderTrackerRowHtml(row, showPlanCol) {
+  const r = row.record;
+  const status = recordStatus(r);
+  const id = (field) => escapeAttr(trackerCellId(row, field));
+  return `
+    <tr data-row-key="${escapeAttr(row.key)}">
+      ${showPlanCol ? `<td><select class="bm-cell-select" id="${id("plan")}" data-cell="plan">${planOptionsHtml(r.plan)}</select></td>` : ""}
+      <td><input class="bm-cell-input" id="${id("name")}" data-cell="name" data-kind="text" value="${escapeAttr(r.name)}" placeholder="${escapeAttr(row.file ? row.file.name : "Name")}" /></td>
+      <td><input class="bm-cell-input" id="${id("memberId")}" data-cell="memberId" data-kind="text" value="${escapeAttr(r.memberId)}" /></td>
+      <td>
+        <div class="bm-cell-date-wrap">
+          <input class="bm-cell-input bm-cell-date${r.entryDate ? "" : " is-empty"}" type="date" id="${id("entryDate")}" data-cell="entryDate" data-kind="date" value="${escapeAttr(r.entryDate)}" />
+          ${r.entryDate ? "" : `<button class="bm-cell-today" data-action="entry-today" title="Set the entry date to today">Today</button>`}
+        </div>
+      </td>
+      <td><input class="bm-cell-input bm-cell-date${r.startDate ? "" : " is-empty"}" type="date" id="${id("startDate")}" data-cell="startDate" data-kind="date" value="${escapeAttr(r.startDate)}" /></td>
+      <td class="bm-cell-center"><input type="checkbox" class="bm-cell-check" id="${id("cardSent")}" data-cell="cardSent" ${r.cardSent ? "checked" : ""} title="${r.cardSent && r.cardSentDate ? `Sent ${escapeAttr(formatDisplayDate(r.cardSentDate))}` : "Member card sent"}" /></td>
+      <td><span class="bm-status bm-status--${status}">${statusLabel(status)}</span></td>
+      <td><input class="bm-cell-input" id="${id("notes")}" data-cell="notes" data-kind="text" value="${escapeAttr(r.notes)}" /></td>
+      <td class="bm-cell-file">
+        ${
+          row.file
+            ? `<button class="bm-cell-file-link" data-action="review" title="Review ${escapeAttr(row.file.path)}">${escapeHtml(row.file.name)}</button>
+               <button class="bm-cell-icon" data-action="open" title="Open in default app">${ICONS.open}</button>`
+            : `<span class="bm-cell-nofile">No file</span>
+               <button class="bm-cell-icon bm-cell-icon-danger" data-action="delete-row" title="Delete this row">${ICONS.trash}</button>`
+        }
+      </td>
+    </tr>`;
+}
+
+function renderTrackerMain() {
+  const scoped = trackerRowsInScope();
+  const rows = trackerFilteredRows();
+  const showPlanCol = state.activePlan === null;
+  const cols = TRACKER_COLUMNS.filter((c) => showPlanCol || c.key !== "plan");
+  const counts = { all: scoped.length };
+  STATUSES.forEach((s) => (counts[s.key] = scoped.filter((r) => recordStatus(r.record) === s.key).length));
+  const unassigned = state.activePlan === null ? state.files.filter((f) => !f.appForm.plan).length : 0;
+  const sort = state.trackerSort;
+
+  const main = el(`
+    <main class="bm-main">
+      ${renderMainTabsHtml()}
+      <div class="bm-toolbar">
+        <div class="bm-field bm-toolbar-search">
+          <label class="bm-field-label" for="tracker-search">Search</label>
+          <div class="bm-search-input-wrap">
+            ${ICONS.search}
+            <input class="bm-input" id="tracker-search" placeholder="Name, member ID, notes, or file…" value="${escapeAttr(state.trackerSearch)}" />
+          </div>
+        </div>
+        <div class="bm-field">
+          <span class="bm-field-label">Status</span>
+          <div class="bm-segmented" role="group" aria-label="Status">
+            ${[{ key: "all", label: "All" }, ...STATUSES]
+              .map(
+                (s) =>
+                  `<button class="bm-segmented-btn ${state.trackerStatus === s.key ? "active" : ""}" data-status-filter="${s.key}">${s.label}<span class="bm-segmented-count">${counts[s.key]}</span></button>`
+              )
+              .join("")}
+          </div>
+        </div>
+        <button class="bm-btn bm-btn-secondary bm-btn-sm bm-toolbar-btn" id="tracker-add-row" title="Add a row with no application file behind it">${ICONS.plus} Add row</button>
+        <button class="bm-btn bm-btn-primary bm-btn-sm bm-toolbar-btn" id="tracker-export" ${summaryPlansInScope().length ? "" : "disabled"} title="Save this plan's tracker and summary as an Excel workbook">${ICONS.download} Export to Excel</button>
+        <button class="bm-btn bm-btn-ghost bm-btn-sm bm-toolbar-btn" id="undo-btn" ${undoStack.length === 0 ? "disabled" : ""}
+          title="${undoStack.length > 0 ? escapeAttr(`Undo: ${undoStack[undoStack.length - 1].label} (Ctrl+Z)`) : "Nothing to undo"}">
+          ${ICONS.undo} Undo
+        </button>
+      </div>
+      ${
+        unassigned
+          ? `<div class="bm-tracker-hint">${unassigned} application file${unassigned === 1 ? " has" : "s have"} no plan yet, so ${unassigned === 1 ? "it isn't" : "they aren't"} tracked. <button class="bm-inline-link" id="tracker-show-unassigned">Show ${unassigned === 1 ? "it" : "them"}</button></div>`
+          : ""
+      }
+      <div class="bm-tracker-wrap" id="tracker-wrap">
+        ${
+          rows.length === 0
+            ? `<div class="bm-empty">
+                ${ICONS.emptyFolder}
+                <div class="bm-empty-title">${scoped.length === 0 ? "Nothing tracked here yet" : "Nothing matches"}</div>
+                <div class="bm-empty-sub">${
+                  scoped.length === 0
+                    ? `Give an application a plan in the Files view, add a row, or <button class="bm-inline-link" id="tracker-import-xlsx">import the old tracker spreadsheet</button>.`
+                    : "Try a different search, or a different status."
+                }</div>
+              </div>`
+            : `<table class="bm-tracker">
+                <thead><tr>
+                  ${cols
+                    .map(
+                      (c) => `<th class="bm-tracker-th-${c.key}"><button class="bm-tracker-sort ${sort.key === c.key ? "active" : ""}" data-sort-key="${c.key}">${c.label}${
+                        sort.key === c.key ? (sort.dir === "desc" ? ICONS.sortDesc : ICONS.sortAsc) : ""
+                      }</button></th>`
+                    )
+                    .join("")}
+                </tr></thead>
+                <tbody>${rows.map((row) => renderTrackerRowHtml(row, showPlanCol)).join("")}</tbody>
+              </table>`
+        }
+      </div>
+      <div class="bm-rule-row bm-tracker-footer"><div class="bm-rule-row-meta">${rows.length} of ${scoped.length} rows</div></div>
+    </main>
+  `);
+
+  wireMainTabs(main);
+  const search = main.querySelector("#tracker-search");
+  // Filtering re-renders the whole view; the search box keeps its focus and
+  // caret through that via render()'s captureFocus/restoreFocus.
+  search.addEventListener("input", () => {
+    state.trackerSearch = search.value;
+    render();
+  });
+  main.querySelectorAll("[data-status-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.trackerStatus = btn.dataset.statusFilter;
+      render();
+    });
+  });
+  main.querySelector("#tracker-add-row").addEventListener("click", addTrackerRow);
+  main.querySelector("#tracker-export").addEventListener("click", exportTracker);
+  main.querySelector("#undo-btn").addEventListener("click", performUndo);
+  main.querySelector("#tracker-show-unassigned")?.addEventListener("click", () => {
+    state.activePlan = NO_PLAN;
+    render();
+  });
+  main.querySelector("#tracker-import-xlsx")?.addEventListener("click", importTrackerSpreadsheet);
+  main.querySelectorAll("[data-sort-key]").forEach((btn) => btn.addEventListener("click", () => setTrackerSort(btn.dataset.sortKey)));
+
+  const byKey = new Map(rows.map((r) => [r.key, r]));
+  main.querySelectorAll("tr[data-row-key]").forEach((tr) => {
+    const row = byKey.get(tr.dataset.rowKey);
+    if (!row) return;
+    tr.querySelectorAll('[data-kind="text"]').forEach((input) => wireRecordTextInput(input, row, input.dataset.cell));
+    tr.querySelectorAll('[data-kind="date"], select[data-cell]').forEach((input) => {
+      input.addEventListener("change", () => setRecordFields(row, { [input.dataset.cell]: input.value }));
+    });
+    tr.querySelector('[data-cell="cardSent"]').addEventListener("change", (e) => setCardSent(row, e.target.checked));
+    tr.querySelector('[data-action="entry-today"]')?.addEventListener("click", () => setRecordFields(row, { entryDate: todayIso() }));
+    tr.querySelector('[data-action="review"]')?.addEventListener("click", () => reviewFileFromTracker(row.file.path));
+    tr.querySelector('[data-action="open"]')?.addEventListener("click", () => openFile(row.file.path));
+    tr.querySelector('[data-action="delete-row"]')?.addEventListener("click", () => deleteTrackerRecord(row));
+  });
+  return main;
+}
+
+// Jumps from a tracker row to its file in review mode, clearing whatever
+// Files-view filters could otherwise hide it (the plan filter stays — the
+// row was only listed because it matches).
+function reviewFileFromTracker(path) {
+  flushPendingRecordSaves();
+  state.mainView = "files";
+  saveMainView("files");
+  state.search = "";
+  state.activeTags = new Set();
+  state.untaggedOnly = false;
+  state.activeFolder = null;
+  state.looseOnly = false;
+  state.selected = new Set([path]);
+  state.selectAnchor = path;
+  state.navCursor = path;
+  enterReviewMode();
+}
+
+// A row with no application file behind it — for an application that came
+// in some other way. Lands at the top (blank entry dates sort newest) with
+// its name cell focused.
+async function addTrackerRow() {
+  const rec = makeBlankRecord(state.activePlan || "");
+  rec.meta = { source: "manual", createdBy: commentSignerName() || "Unknown", createdAt: new Date().toISOString() };
+  let saved;
+  try {
+    saved = normalizeRecord(await window.api.saveRecord(state.folder, null, rec));
+  } catch (e) {
+    alert(`Couldn't add a row:\n${e.message || e}`);
+    return;
+  }
+  state.records.push(saved);
+  state.trackerSearch = "";
+  state.trackerStatus = "all";
+  pushUndo("Add tracker row", () => window.api.deleteRecord(state.folder, saved.id));
+  setTimeout(() => document.getElementById(trackerCellId(rowForRecord(saved), "name"))?.focus(), 0); // after pushUndo's own deferred render
+}
+
+async function deleteTrackerRecord(row) {
+  if (!confirm(`Delete the row for "${row.record.name || "(no name)"}"? You can undo this with Ctrl+Z.`)) return;
+  const id = row.record.id;
+  const data = JSON.parse(JSON.stringify(row.record));
+  try {
+    await window.api.deleteRecord(state.folder, row.record.id);
+  } catch (e) {
+    alert(`Couldn't delete that row:\n${e.message || e}`);
+    return;
+  }
+  state.records = state.records.filter((r) => r.id !== row.record.id);
+  pushUndo("Delete tracker row", () => trackWrite(window.api.saveRecord(state.folder, id, data)));
+}
+
+// The plans a report covers: the rail's selected plan, or every plan under
+// "All plans" (plus any plan since removed from the list that some rows
+// still carry). "No plan" isn't a plan, so it has no report.
+function summaryPlansInScope() {
+  if (state.activePlan === NO_PLAN) return [];
+  if (state.activePlan !== null) return [state.activePlan];
+  const extra = [...new Set(allRows().map((r) => r.record.plan).filter(Boolean))].filter((p) => !state.plans.includes(p));
+  return [...state.plans, ...extra];
+}
+
+function planRecords(plan) {
+  return allRows()
+    .filter((r) => r.record.plan === plan)
+    .map((r) => r.record);
+}
+
+async function exportTracker() {
+  flushPendingRecordSaves();
+  const plans = summaryPlansInScope().map((name) => ({
+    name,
+    records: allRows()
+      .filter((r) => r.record.plan === name)
+      .map(({ record: r, file }) => ({
+        plan: r.plan,
+        name: r.name || (file ? file.name : ""),
+        memberId: r.memberId,
+        entryDate: r.entryDate,
+        startDate: r.startDate,
+        cardSent: r.cardSent,
+        cardSentDate: r.cardSentDate,
+        notes: r.notes,
+        file: file ? file.path : "",
+      })),
+  }));
+  if (plans.length === 0) return;
+  const scope = state.activePlan === null ? "All plans" : state.activePlan;
+  try {
+    await window.api.exportTrackerXlsx(plans, state.summaryYear, `Member Tracker - ${scope} - ${todayIso()}.xlsx`);
+  } catch (e) {
+    alert(`Couldn't export:\n${e.message || e}`);
+  }
+}
+
+// ---- Summary view ----
+// The old spreadsheet's "<Plan> Summary" sheets: per plan in scope, the
+// running totals and the monthly/weekly tables from buildPlanSummary. Each
+// table carries a single-series bar of its "New applications" column —
+// the table itself holds the exact numbers, the bar is for the shape.
+
+function renderSummaryTableHtml(firstHeader, rows, totals, highlightKey) {
+  const max = Math.max(1, ...rows.map((r) => r.newApps));
+  return `
+    <table class="bm-summary-table">
+      <thead><tr>
+        <th>${firstHeader}</th><th class="bm-num">Complete</th><th class="bm-num">Pending card</th><th class="bm-num">New applications</th><th class="bm-summary-bar-col" aria-hidden="true"></th>
+      </tr></thead>
+      <tbody>
+        ${rows
+          .map(
+            (r) => `
+          <tr class="${r.key === highlightKey ? "bm-summary-current" : ""}">
+            <td>${escapeHtml(r.label)}</td>
+            <td class="bm-num">${r.complete}</td>
+            <td class="bm-num">${r.pending}</td>
+            <td class="bm-num bm-num-strong">${r.newApps}</td>
+            <td class="bm-summary-bar-col">${
+              r.newApps
+                ? `<div class="bm-summary-bar" style="width:${((r.newApps / max) * 100).toFixed(1)}%" title="${escapeAttr(`${r.label}: ${r.newApps} new (${r.complete} complete, ${r.pending} pending card)`)}"></div>`
+                : ""
+            }</td>
+          </tr>`
+          )
+          .join("")}
+      </tbody>
+      <tfoot><tr>
+        <td>Total</td><td class="bm-num">${totals.complete}</td><td class="bm-num">${totals.pending}</td><td class="bm-num bm-num-strong">${totals.newApps}</td><td></td>
+      </tr></tfoot>
+    </table>`;
+}
+
+function renderPlanSummaryHtml(plan, year) {
+  const s = buildPlanSummary(planRecords(plan), year);
+  const today = todayIso();
+  const tiles = [
+    { label: "Total", value: s.totals.total },
+    { label: "Awaiting entry", value: s.totals.awaiting, status: "awaiting" },
+    { label: "Pending card", value: s.totals.pending, status: "pending" },
+    { label: "Complete", value: s.totals.complete, status: "complete" },
+  ];
+  return `
+    <section class="bm-summary-plan">
+      <h2 class="bm-summary-title">${escapeHtml(plan)}</h2>
+      <div class="bm-summary-tiles">
+        ${tiles
+          .map(
+            (t) => `
+          <div class="bm-summary-tile">
+            <div class="bm-summary-tile-label">${t.status ? `<span class="bm-status-dot bm-status-dot--${t.status}"></span>` : ""}${t.label}</div>
+            <div class="bm-summary-tile-value">${t.value}</div>
+          </div>`
+          )
+          .join("")}
+      </div>
+      <div class="bm-summary-tables">
+        <div>
+          <div class="bm-section-label">Monthly · ${year}</div>
+          ${renderSummaryTableHtml("Month", s.months, s.monthTotals, today.slice(0, 7))}
+        </div>
+        <div>
+          <div class="bm-section-label">Weekly · last ${s.weeks.length} weeks</div>
+          ${renderSummaryTableHtml("Week of", s.weeks, s.weekTotals, weekStartIso(today))}
+        </div>
+      </div>
+    </section>`;
+}
+
+function renderSummaryMain() {
+  const plans = summaryPlansInScope();
+  const years = summaryYears(plans.flatMap(planRecords));
+  if (!years.includes(state.summaryYear)) years.push(state.summaryYear);
+  years.sort((a, b) => b - a);
+  const main = el(`
+    <main class="bm-main">
+      ${renderMainTabsHtml()}
+      <div class="bm-toolbar">
+        <div class="bm-field bm-toolbar-year">
+          <label class="bm-field-label" for="summary-year">Year</label>
+          <select class="bm-select" id="summary-year">
+            ${years.map((y) => `<option value="${y}" ${y === state.summaryYear ? "selected" : ""}>${y}</option>`).join("")}
+          </select>
+        </div>
+        <div class="bm-summary-note">Counted by application entry date. New applications = complete + pending card.</div>
+        <button class="bm-btn bm-btn-primary bm-btn-sm bm-toolbar-btn" id="summary-export" ${plans.length ? "" : "disabled"} title="Save the tracker and this summary as an Excel workbook">${ICONS.download} Export to Excel</button>
+      </div>
+      <div class="bm-summary-wrap" id="summary-wrap">
+        ${
+          plans.length === 0
+            ? `<div class="bm-empty">
+                ${ICONS.emptyFolder}
+                <div class="bm-empty-title">No plan selected</div>
+                <div class="bm-empty-sub">Applications with no plan aren't part of any plan's summary. Choose a plan, or All plans, in the sidebar.</div>
+              </div>`
+            : plans.map((p) => renderPlanSummaryHtml(p, state.summaryYear)).join("")
+        }
+      </div>
+    </main>
+  `);
+  wireMainTabs(main);
+  main.querySelector("#summary-year").addEventListener("change", (e) => {
+    state.summaryYear = Number(e.target.value);
+    render();
+  });
+  main.querySelector("#summary-export").addEventListener("click", exportTracker);
   return main;
 }
 
@@ -2548,7 +3141,7 @@ function startColumnResize(e, col) {
 // as startColumnResize above, writing straight to a --review-preview-width
 // custom property on .bm-body (see .bm-body-review in styles.css) so
 // dragging never triggers a render() and stays smooth regardless of how
-// heavy the Application tab's form is. The handle sits at the pane's left
+// heavy the pane's contents are. The handle sits at the pane's left
 // edge, so dragging left (negative clientX delta) grows it — the opposite
 // sign from a column's right-edge handle.
 function startPreviewResize(e) {
@@ -2585,6 +3178,11 @@ function buildGridCard(f, isSelected) {
       <div class="bm-card-body">
         <div class="bm-card-name">${f.name}</div>
         <div class="bm-card-meta">${formatSize(f.size)} · ${formatDate(f.mtime)}</div>
+        ${
+          f.appForm.plan
+            ? `<div class="bm-card-app"><span class="bm-status-dot bm-status-dot--${recordStatus(f.appForm)}"></span>${escapeHtml(f.appForm.plan)} · ${statusLabel(recordStatus(f.appForm))}</div>`
+            : ""
+        }
         ${f.dir ? `<div class="bm-card-dir" title="${f.dir.replace(/"/g, "&quot;")}">${ICONS.folder} ${f.dir}</div>` : ""}
         ${
           f.tags.length > 0
@@ -2863,7 +3461,6 @@ function renderLocationField(file) {
               .join("")}
           </select>
           <button class="bm-btn bm-btn-secondary bm-btn-sm" id="autorename-btn" title="Rename to the current date and time, to clear a name collision at the destination">${ICONS.pencil} Autorename</button>
-          <button class="bm-btn bm-btn-secondary bm-btn-sm" id="autoexport-btn" title="Save a copy to your autoexport folder as a PDF, leaving this file untouched (set the folder the first time, or in Options)">${ICONS.download} Autoexport</button>
         </div>
       </div>
     </div>`;
@@ -2879,8 +3476,6 @@ function wireLocationField(panel) {
   }
   const autorenameBtn = panel.querySelector("#autorename-btn");
   if (autorenameBtn) autorenameBtn.addEventListener("click", autorenameSelected);
-  const autoexportBtn = panel.querySelector("#autoexport-btn");
-  if (autoexportBtn) autoexportBtn.addEventListener("click", autoexportSelected);
 }
 
 // Builds the actual <embed>/<img> for a file — shared by the single-file
@@ -2953,10 +3548,9 @@ async function rotateFile(file) {
   }
 }
 
-// The Tags/Comments editor — the preview pane's only content outside review
-// mode, and one of two tabs (alongside the Application form, see
-// application-form.js) inside it. Extracted to its own render/wire pair so
-// review mode can swap it for the Application tab without duplicating this.
+// The Location/Tags/Comments editor — the single-file preview pane's
+// second section, under the Application fields (see application-form.js's
+// renderApplicationFieldsHtml).
 function renderTagsCommentsPaneHtml(file) {
   return `
     ${renderLocationField(file)}
@@ -3052,36 +3646,11 @@ function wireTagsCommentsPane(panel) {
   panel.querySelector("#add-comment-btn").addEventListener("click", addComment);
 }
 
-// Review mode's preview pane gets a 2-tab strip (Application / Tags &
-// Comments) in place of always showing tags/comments — see
-// state.reviewPreviewTab and application-form.js's renderApplicationFormHtml.
-function renderReviewTabStripHtml() {
-  return `
-    <div class="bm-review-tabs" role="tablist">
-      <button class="bm-review-tab${state.reviewPreviewTab === "application" ? " active" : ""}" data-tab="application" role="tab">Application</button>
-      <button class="bm-review-tab${state.reviewPreviewTab === "tagsComments" ? " active" : ""}" data-tab="tagsComments" role="tab">Tags &amp; Comments</button>
-    </div>`;
-}
-
-function wireReviewTabStrip(panel) {
-  panel.querySelectorAll(".bm-review-tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const tab = btn.dataset.tab;
-      if (tab === state.reviewPreviewTab) return;
-      flushPendingAppForms();
-      flushPendingComments();
-      state.reviewPreviewTab = tab;
-      render();
-    });
-  });
-}
-
 function renderPreviewSingle(file, opts = {}) {
   // Review mode's big viewer (renderReviewMain) shows this file's plate
   // instead — showing it twice at once would be redundant screen space.
   const hidePlate = !!opts.reviewMode;
-  const showTabs = !!opts.reviewMode;
-  const activeTab = showTabs ? state.reviewPreviewTab : "tagsComments";
+  const row = rowForFile(file);
   const panel = el(`
     <aside class="bm-preview">
       ${opts.reviewMode ? `<div class="bm-preview-resize" title="Drag to resize"></div>` : ""}
@@ -3104,9 +3673,9 @@ function renderPreviewSingle(file, opts = {}) {
         <div class="bm-rotate-frame">${renderMediaHtml(file)}</div>
       </div>`
       }
-      ${showTabs ? renderReviewTabStripHtml() : ""}
       <div class="bm-preview-scroll">
-        ${activeTab === "application" ? renderApplicationFormHtml(file) : renderTagsCommentsPaneHtml(file)}
+        ${renderApplicationFieldsHtml(row)}
+        ${renderTagsCommentsPaneHtml(file)}
       </div>
     </aside>
   `);
@@ -3124,12 +3693,51 @@ function renderPreviewSingle(file, opts = {}) {
       startPreviewResize(e);
     });
   }
-  if (showTabs) wireReviewTabStrip(panel);
-  if (activeTab === "application") wireApplicationForm(panel, file);
-  else wireTagsCommentsPane(panel);
+  wireApplicationFields(panel, row);
+  wireTagsCommentsPane(panel);
   panel.querySelector("#delete-btn").addEventListener("click", deleteSelected);
 
   return panel;
+}
+
+// The multi-select pane's Application section: the record changes that
+// make sense for a whole batch at once — filing a stack of scans under a
+// plan, or marking a day's worth entered or their cards sent.
+function renderBulkApplicationHtml(files) {
+  const plans = new Set(files.map((f) => f.appForm.plan || NO_PLAN));
+  const shared = plans.size === 1 ? [...plans][0] : null;
+  const allEnteredToday = files.every((f) => f.appForm.entryDate === todayIso());
+  const allSent = files.every((f) => f.appForm.cardSent);
+  return `
+    <div>
+      <div class="bm-section-label">Application</div>
+      <div class="bm-field">
+        <label class="bm-field-label" for="bulk-plan">Plan for all ${files.length}</label>
+        <select class="bm-select" id="bulk-plan">
+          ${shared === null ? `<option value="__mixed__" selected disabled>Mixed plans</option>` : ""}
+          ${planOptionsHtml(shared)}
+        </select>
+      </div>
+      <div class="bm-field-row bm-bulk-actions">
+        <button class="bm-btn bm-btn-secondary bm-btn-sm" id="bulk-entry-today" ${allEnteredToday ? "disabled" : ""}>Entered today</button>
+        <button class="bm-btn bm-btn-secondary bm-btn-sm" id="bulk-card-sent">${allSent ? "Mark cards not sent" : "Mark cards sent"}</button>
+      </div>
+    </div>`;
+}
+
+function wireBulkApplication(panel, files) {
+  panel.querySelector("#bulk-plan").addEventListener("change", (e) => {
+    const plan = e.target.value;
+    setRecordFieldsForFiles(files, { plan }, `Set plan to ${plan || "No plan"} on ${files.length} files`);
+  });
+  panel.querySelector("#bulk-entry-today").addEventListener("click", () => {
+    setRecordFieldsForFiles(files.filter((f) => f.appForm.entryDate !== todayIso()), { entryDate: todayIso() }, `Set entry date on ${files.length} files`);
+  });
+  panel.querySelector("#bulk-card-sent").addEventListener("click", () => {
+    const send = !files.every((f) => f.appForm.cardSent);
+    const changing = files.filter((f) => f.appForm.cardSent !== send);
+    setRecordFieldsForFiles(changing, { cardSent: send, cardSentDate: send ? todayIso() : "" }, `Mark ${changing.length} card${changing.length === 1 ? "" : "s"} ${send ? "sent" : "not sent"}`);
+  });
 }
 
 function renderPreviewMulti(files) {
@@ -3159,6 +3767,7 @@ function renderPreviewMulti(files) {
           .join("")}
       </div>
       <div class="bm-preview-scroll">
+        ${renderBulkApplicationHtml(files)}
         ${renderLocationField(null)}
         <div>
           <div class="bm-section-label">Tags shared by all ${files.length}</div>
@@ -3212,6 +3821,7 @@ function renderPreviewMulti(files) {
       render();
     });
   });
+  wireBulkApplication(panel, files);
   wireLocationField(panel);
   const tagSelect = panel.querySelector("#tag-select");
   if (tagSelect) {
@@ -3605,13 +4215,6 @@ function renderSettingsModal() {
             <button class="bm-btn bm-btn-secondary bm-btn-sm" id="settings-change-name-btn">Change</button>`
             }
           </div>
-          <div class="bm-settings-row">
-            <div>
-              <div class="bm-settings-row-label">Autoexport folder</div>
-              <div class="bm-settings-row-value">${escapeHtml(state.autoexportFolder || "Not set")}</div>
-            </div>
-            <button class="bm-btn bm-btn-secondary bm-btn-sm" id="settings-change-autoexport-btn">Change</button>
-          </div>
         </div>
         <div class="bm-modal-footer">
           <button class="bm-btn bm-btn-primary bm-btn-maroon bm-btn-sm" id="settings-modal-close">Close</button>
@@ -3631,10 +4234,6 @@ function renderSettingsModal() {
   overlay.querySelector("#settings-change-name-btn")?.addEventListener("click", () => {
     state.settingsModalOpen = false;
     openCommenterNameModal();
-  });
-  overlay.querySelector("#settings-change-autoexport-btn").addEventListener("click", async () => {
-    const chosen = await window.api.selectFolder();
-    if (chosen) await setAutoexportFolder(chosen);
   });
 
   return overlay;
@@ -3712,6 +4311,7 @@ async function pickApiForm(formId) {
     consumerSecret: state.apiSetupDraft.consumerSecret.trim(),
     formId,
     fieldMapping: sameForm ? state.apiConfig.fieldMapping || [] : [],
+    recordMapping: sameForm ? state.apiConfig.recordMapping : undefined, // field ids are specific to one form
     importedEntries: sameForm ? state.apiConfig.importedEntries || {} : {},
   };
   state.apiConfig = await window.api.saveApiConfig(state.folder, config);
@@ -3791,70 +4391,39 @@ function renderApiSetupModal() {
   return overlay;
 }
 
-// APP_FIELD_FIXED_GROUPS, MEMBER_SLOT_FIELDS, customFieldScopeLabel,
-// customFieldTarget, buildNaturalAppFieldRows, buildAppFieldRows, and
-// slugifyFieldKey now live in application-form.js -- they're the same
-// "what fields exist" catalog the Application tab and the Manage Form
-// Fields screen both need, not something specific to this mapping modal.
+// The only online answers that need mapping: the ones that fill in the
+// record's name (first + last, or one full-name field), member ID, and
+// member start date. Everything else the applicant answered is in the
+// imported PDF, straight off the form (see application-pdf.js). Also where
+// imported applications' plan is chosen — only one plan takes applications
+// online.
+const MAPPED_RECORD_FIELDS = [
+  { key: "firstName", label: "First name", hint: "Or the whole name, if the form asks for it in one field" },
+  { key: "lastName", label: "Last name" },
+  { key: "memberId", label: "Member ID" },
+  { key: "startDate", label: "Member start date" },
+];
 
 async function openApiMappingModal() {
+  if (state.tagModalOpen) closeTagManager(false);
+  if (state.aboutOpen) closeAbout();
+  if (state.settingsModalOpen) closeSettingsModal();
+  const mapping = (await window.api.getRecordMapping(state.folder)) || {};
+  state.apiMappingDraft = {
+    firstName: mapping.firstName || "",
+    lastName: mapping.lastName || "",
+    memberId: mapping.memberId || "",
+    startDate: mapping.startDate || "",
+    plan: state.apiConfig.plan !== undefined ? state.apiConfig.plan : state.plans[0] || "",
+  };
   state.apiMappingModalOpen = true;
   state.apiMappingBusy = true;
   state.apiMappingError = null;
   state.apiMappingFields = [];
-  state.apiMappingConnections = {};
-  state.apiMappingArmed = null;
-  state.apiMappingMoveArmed = null;
-  state.apiMappingCustomFields = [...(state.formSchema?.customFields || [])];
-  state.apiMappingRemovedFields = [...(state.formSchema?.removedFields || [])];
-  state.apiMappingOrder = [...(state.formSchema?.appFieldOrder || [])];
-  state.apiMappingSlotCount = 1;
   render();
   try {
     const { siteUrl, consumerKey, consumerSecret, formId } = state.apiConfig;
     state.apiMappingFields = await window.api.getGfFormFields(siteUrl, consumerKey, consumerSecret, formId);
-    const connections = {};
-    let maxSlot = 1;
-    (state.apiConfig.fieldMapping || []).forEach((m) => {
-      if (!m.target || m.target === "ignore") return;
-      connections[m.gfFieldId] = m.target;
-      // Matches both member:slotN.* (a real schema field on that slot) and
-      // membercustom:slotN.* (a custom field categorized under it) -- either
-      // one means that household-member slot needs to exist in the App list.
-      const slotMatch = /^member(?:custom)?:slot(\d+)\./.exec(m.target);
-      if (slotMatch) maxSlot = Math.max(maxSlot, Number(slotMatch[1]));
-    });
-    // A List field that's evidently the household's dependents (first- and
-    // last-name columns) belongs on the Children / Dependents target, which
-    // turns each row into a household member -- so if it's still sitting
-    // unmapped or on a plain custom field (the only option before that
-    // target existed), connect it there now. Only proposed, like any other
-    // change in this modal: nothing's written until Save.
-    state.apiMappingNotice = null;
-    if (!state.apiMappingRemovedFields.includes(DEPENDENTS_TARGET)) {
-      state.apiMappingFields.forEach((f) => {
-        const current = connections[f.gfFieldId];
-        const isCustom = current && (current.startsWith("custom:") || current.startsWith("membercustom:"));
-        if (!looksLikeDependentsList(f) || (current && !isCustom)) return;
-        connections[f.gfFieldId] = DEPENDENTS_TARGET;
-        state.apiMappingNotice = `"${f.label}" is now connected to Children / Dependents, so each person in it becomes a household member. Click Save mapping to keep this${
-          Object.keys(state.apiConfig.importedEntries || {}).length ? " -- already-imported applications will be updated too" : ""
-        }.`;
-      });
-    }
-    state.apiMappingConnections = connections;
-    state.apiMappingSlotCount = maxSlot;
-
-    // Refresh the saved mapping's copy of each online field's type/choices
-    // (see enrichFieldMapping) -- what the Application tab uses to show
-    // fields the way the online form asks them. Saved right away rather
-    // than waiting for Save mapping: it's a correction to what the online
-    // fields already are (e.g. a mapping saved before this existed, or a
-    // dropdown whose choices were since edited online), not a mapping change.
-    const enriched = enrichFieldMapping(state.apiConfig.fieldMapping, state.apiMappingFields);
-    if (enriched.changed) {
-      state.apiConfig = await window.api.saveApiConfig(state.folder, { ...state.apiConfig, fieldMapping: enriched.fieldMapping });
-    }
   } catch (e) {
     state.apiMappingError = e.message || String(e);
   } finally {
@@ -3865,710 +4434,229 @@ async function openApiMappingModal() {
 
 function closeApiMappingModal() {
   state.apiMappingModalOpen = false;
-  state.apiMappingConnections = {};
-  state.apiMappingArmed = null;
-  state.apiMappingMoveArmed = null;
-  state.apiMappingCustomFields = [];
-  state.apiMappingRemovedFields = [];
-  state.apiMappingOrder = [];
-  state.apiMappingNotice = null;
+  state.apiMappingDraft = null;
   render();
 }
 
-function armApiMappingField(gfFieldId) {
-  state.apiMappingMoveArmed = null; // mutually exclusive -- arming a connect target cancels a pending move
-  state.apiMappingArmed = state.apiMappingArmed === gfFieldId ? null : gfFieldId;
+// Saves the mapping, then fills in any already-imported application that's
+// missing one of the mapped values (see main.js's apply-mapping-to-imported
+// — it never overwrites anything already there).
+async function saveApiMapping() {
+  const { plan, ...recordMapping } = state.apiMappingDraft;
+  state.apiMappingBusy = true;
   render();
-  positionMappingConnectors();
-}
-
-function connectApiMapping(appFieldId) {
-  if (!state.apiMappingArmed) return;
-  state.apiMappingConnections[state.apiMappingArmed] = appFieldId;
-  state.apiMappingArmed = null;
-  render();
-  positionMappingConnectors();
-}
-
-function disconnectApiMapping(gfFieldId) {
-  delete state.apiMappingConnections[gfFieldId];
-  render();
-  positionMappingConnectors();
-}
-
-function addMappingHouseholdMemberSlot() {
-  state.apiMappingSlotCount += 1;
-  render();
-  positionMappingConnectors();
-}
-
-// The armed API field had nothing to connect to -- create a new App-side
-// field seeded with its own label (editable later the same way a renamed
-// tag would be, i.e. not yet -- v1 just takes the API label as-is),
-// categorized under `scope` (see customFieldScopeLabel -- "household" for
-// the flat catch-all, or a specific member), and connect it immediately,
-// since it exists for exactly this one field.
-function addMappingCustomField(scope) {
-  if (!state.apiMappingArmed) return;
-  const field = state.apiMappingFields.find((f) => f.gfFieldId === state.apiMappingArmed);
-  if (!field) return;
-  const usedKeys = new Set(state.apiMappingCustomFields.map((c) => c.key));
-  const key = slugifyFieldKey(field.label, usedKeys);
-  // No type of its own needed: while it's connected, it's shown the way the
-  // online field asks it (dropdown with its choices, date, checkbox, ...) --
-  // see customFieldPresentation.
-  const customField = { key, label: field.label, scope };
-  state.apiMappingCustomFields.push(customField);
-  state.apiMappingConnections[state.apiMappingArmed] = customFieldTarget(customField);
-  state.apiMappingArmed = null;
-  render();
-  positionMappingConnectors();
-}
-
-// Permanently deletes an App-side row -- a custom field (splices it out of
-// apiMappingCustomFields entirely, e.g. one created before a real schema
-// field like ssExempt was available as a proper target) or a built-in one
-// (joins apiMappingRemovedFields, same permanent delete Manage Form Fields
-// does -- no restore, ever). Required fields never even show this button
-// (see renderApiMappingModal), so there's no required-check needed here.
-// Any API field still connected to the target is disconnected first
-// (confirmed, since that's a real change, not just tidying) rather than
-// left pointing at a target that no longer exists.
-function deleteMappingField(target) {
-  const customField = state.apiMappingCustomFields.find((c) => customFieldTarget(c) === target);
-  const connectedGfIds = Object.keys(state.apiMappingConnections).filter(
-    (gfId) => state.apiMappingConnections[gfId] === target
-  );
-  if (connectedGfIds.length > 0) {
-    const names = connectedGfIds
-      .map((gfId) => state.apiMappingFields.find((f) => f.gfFieldId === gfId)?.label || gfId)
-      .join(", ");
-    if (!confirm(`"${names}" is still connected to this field. Delete it and disconnect that field?`)) return;
-  }
-  if (customField) {
-    state.apiMappingCustomFields = state.apiMappingCustomFields.filter((c) => c !== customField);
-  } else if (!state.apiMappingRemovedFields.includes(target)) {
-    state.apiMappingRemovedFields.push(target);
-  }
-  connectedGfIds.forEach((gfId) => delete state.apiMappingConnections[gfId]);
-  state.apiMappingOrder = state.apiMappingOrder.filter((id) => id !== target);
-  render();
-  positionMappingConnectors();
-}
-
-// Draws one <line> per current connection between the two columns' actual
-// row elements -- re-run after every render of this modal (open, connect,
-// disconnect, add-slot, add-field — see render()'s modal block below) and
-// while the shared scroll container scrolls (see the listener in
-// renderApiMappingModal), since scrolling moves rows without triggering a
-// render(). Coordinates come straight from getBoundingClientRect() relative
-// to the container both the rows and the <svg> itself share, so this stays
-// correct regardless of scroll position without any separate offset math.
-function positionMappingConnectors() {
-  const svg = document.getElementById("api-mapping-svg");
-  const container = document.getElementById("api-mapping-container");
-  if (!svg || !container) return;
-  // The svg has to span the container's full SCROLLABLE content, not just
-  // its visible viewport -- sizing it via CSS 100%/inset:0 (the original
-  // bug) instead matches it to whatever's currently on screen, so once
-  // scrolled past the first screenful the svg itself sits above the visible
-  // area and every line in it vanishes. scrollWidth/scrollHeight give the
-  // true content size regardless of scroll position.
-  svg.style.width = `${container.scrollWidth}px`;
-  svg.style.height = `${container.scrollHeight}px`;
-  // getBoundingClientRect() is viewport-relative (i.e. it shifts as the
-  // container scrolls), but the svg's own (0,0) is pinned to the
-  // container's *content* origin (top:0/left:0 in the scrollable flow,
-  // unaffected by scroll) -- so every coordinate below is converted from
-  // "where on screen" to "where in the content" by adding back however far
-  // the container is currently scrolled, keeping lines correctly placed at
-  // any scroll position.
-  const containerRect = container.getBoundingClientRect();
-  const originX = containerRect.left - container.scrollLeft;
-  const originY = containerRect.top - container.scrollTop;
-  svg.innerHTML = "";
-  Object.entries(state.apiMappingConnections).forEach(([gfFieldId, appFieldId]) => {
-    const leftRow = container.querySelector(`.bm-api-field-row[data-gf-field-id="${gfFieldId}"]`);
-    const rightRow = container.querySelector(`.bm-app-field-row[data-app-field-id="${appFieldId}"]`);
-    if (!leftRow || !rightRow) return;
-    const leftRect = leftRow.getBoundingClientRect();
-    const rightRect = rightRow.getBoundingClientRect();
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", leftRect.right - originX);
-    line.setAttribute("y1", leftRect.top + leftRect.height / 2 - originY);
-    line.setAttribute("x2", rightRect.left - originX);
-    line.setAttribute("y2", rightRect.top + rightRect.height / 2 - originY);
-    line.setAttribute("class", "bm-api-connector-line");
-    svg.appendChild(line);
-  });
-}
-
-// Drag-to-reorder one App-side row -- fine for a short move, but on a form
-// with hundreds of fields a real drag is bounded by whatever's on screen:
-// you can't scroll while the mouse button is held down, so moving a row
-// any real distance means drag-release-scroll-drag-release over and over.
-// So a plain CLICK on the same handle (mousedown+mouseup with no real
-// movement) does something else entirely: arms this row for a "click to
-// move" instead (see toggleMoveArmed) -- scroll anywhere with the button
-// released, then click any other row to drop the armed one right there.
-// Distinguishing the two is just a movement threshold on the same
-// mousedown; nothing about the live-drag path itself changes (still no
-// render() until commit, same as startColumnResize/startPreviewResize).
-function startMappingReorderDrag(draggedId, downEvent) {
-  const rightCol = document.querySelector(".bm-api-connector-col-right");
-  const rowEl = rightCol?.querySelector(`.bm-app-field-row[data-app-field-id="${draggedId}"]`);
-  if (!rowEl) return;
-  const addSlotBtn = rightCol.querySelector("#api-add-slot-btn");
-  const startX = downEvent.clientX;
-  const startY = downEvent.clientY;
-  const DRAG_THRESHOLD = 5;
-  let dragging = false;
-  beginPointerDrag((ev) => {
-    if (!dragging) {
-      if (Math.abs(ev.clientX - startX) < DRAG_THRESHOLD && Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
-      dragging = true;
-      rowEl.classList.add("dragging");
-    }
-    const rows = [...rightCol.querySelectorAll(".bm-app-field-row")].filter((r) => r !== rowEl);
-    const target = rows.find((row) => ev.clientY < row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2);
-    rightCol.insertBefore(rowEl, target || addSlotBtn);
-    positionMappingConnectors();
-  });
-  const commit = () => {
-    document.removeEventListener("mouseup", commit);
-    if (dragging) {
-      rowEl.classList.remove("dragging");
-      state.apiMappingOrder = [...rightCol.querySelectorAll(".bm-app-field-row")].map((r) => r.dataset.appFieldId);
-      render();
-      positionMappingConnectors();
-    } else {
-      toggleMoveArmed(draggedId);
-    }
-  };
-  document.addEventListener("mouseup", commit);
-}
-
-function toggleMoveArmed(rowId) {
-  state.apiMappingArmed = null; // mutually exclusive -- arming a move cancels a pending connect
-  state.apiMappingMoveArmed = state.apiMappingMoveArmed === rowId ? null : rowId;
-  render();
-  positionMappingConnectors();
-}
-
-// Drops the armed row immediately before `targetId` in the saved order --
-// computed off the current fully-resolved row list (buildAppFieldRows) so
-// this works correctly regardless of whether apiMappingOrder has ever been
-// explicitly set before.
-function moveAppFieldTo(movedId, targetId) {
-  state.apiMappingMoveArmed = null;
-  if (movedId === targetId) {
+  try {
+    state.apiConfig = await window.api.saveApiConfig(state.folder, { ...state.apiConfig, recordMapping, plan });
+  } catch (e) {
+    state.apiMappingError = e.message || String(e);
+    state.apiMappingBusy = false;
     render();
     return;
   }
-  const ids = buildAppFieldRows(
-    state.apiMappingSlotCount,
-    state.apiMappingCustomFields,
-    state.apiMappingOrder,
-    state.apiMappingRemovedFields
-  ).map((r) => r.id);
-  const fromIdx = ids.indexOf(movedId);
-  if (fromIdx === -1) return;
-  ids.splice(fromIdx, 1);
-  const toIdx = ids.indexOf(targetId);
-  ids.splice(toIdx === -1 ? ids.length : toIdx, 0, movedId);
-  state.apiMappingOrder = ids;
-  render();
-  positionMappingConnectors();
-}
-
-// "Move to top"/"move to bottom" quick actions, shown once a row is armed
-// for moving -- the fast path for the two extremes, with click-to-drop
-// (moveAppFieldTo) covering everywhere in between.
-function moveArmedToEdge(edge) {
-  const movedId = state.apiMappingMoveArmed;
-  if (!movedId) return;
-  state.apiMappingMoveArmed = null;
-  const ids = buildAppFieldRows(state.apiMappingSlotCount, state.apiMappingCustomFields, state.apiMappingOrder, state.apiMappingRemovedFields)
-    .map((r) => r.id)
-    .filter((id) => id !== movedId);
-  if (edge === "top") ids.unshift(movedId);
-  else ids.push(movedId);
-  state.apiMappingOrder = ids;
-  render();
-  positionMappingConnectors();
-}
-
-async function saveApiMapping() {
-  const fieldMapping = state.apiMappingFields.map((f) => ({
-    gfFieldId: f.gfFieldId,
-    label: f.label,
-    target: state.apiMappingConnections[f.gfFieldId] || "ignore",
-    ...gfFieldInfo(f), // the online field's type/choices -- see presentationFromGfInfo
-  }));
-  // Rebuilt from scratch, same rule as before this was a visual editor: a
-  // custom field only survives the save if some row is still connected to
-  // it -- matched by its full target string (customFieldTarget), which
-  // differs by scope (household vs. a specific member), not just its key.
-  const usedTargets = new Set(fieldMapping.map((m) => m.target));
-  const customFields = state.apiMappingCustomFields.filter((c) => usedTargets.has(customFieldTarget(c)));
-  const appFieldOrder = state.apiMappingOrder.length
-    ? state.apiMappingOrder
-    : buildAppFieldRows(state.apiMappingSlotCount, customFields, [], state.apiMappingRemovedFields).map((r) => r.id);
-
-  const oldFieldMapping = state.apiConfig.fieldMapping || [];
-  state.apiConfig = await window.api.saveApiConfig(state.folder, {
-    ...state.apiConfig,
-    fieldMapping,
-  });
-  state.formSchema = await window.api.saveFormSchema(state.folder, {
-    ...state.formSchema,
-    customFields,
-    removedFields: state.apiMappingRemovedFields,
-    appFieldOrder,
-  });
-  state.customFieldDefs = state.formSchema.customFields || [];
-  const hasImportedEntries = Object.keys(state.apiConfig.importedEntries || {}).length > 0;
   closeApiMappingModal();
-
-  if (hasImportedEntries) {
-    const result = await window.api.remapImportedEntries(state.folder, oldFieldMapping, fieldMapping);
-    if (result.migrated.length > 0 || result.skipped.length > 0) {
-      const lines = [];
-      if (result.migrated.length > 0) {
-        lines.push(`Updated ${result.migrated.length} field(s) across previously imported applications.`);
-      }
-      if (result.skipped.length > 0) {
-        lines.push(`Left ${result.skipped.length} field(s) alone because the destination already had a value.`);
-      }
-      alert(lines.join("\n"));
+  if (Object.keys(state.apiConfig.importedEntries || {}).length === 0) return;
+  try {
+    const { updated } = await window.api.applyMappingToImported(state.folder);
+    if (updated > 0) {
       await refreshFiles();
+      alert(`Filled in the name, member ID, start date, or plan on ${updated} already-imported application${updated === 1 ? "" : "s"}. Nothing that was already filled in was changed.`);
     }
+  } catch (e) {
+    alert(`The mapping was saved, but already-imported applications couldn't be updated:\n${e.message || e}`);
   }
 }
 
 function renderApiMappingModal() {
-  const armedField = state.apiMappingArmed
-    ? state.apiMappingFields.find((f) => f.gfFieldId === state.apiMappingArmed)
-    : null;
-  const appRows = buildAppFieldRows(state.apiMappingSlotCount, state.apiMappingCustomFields, state.apiMappingOrder, state.apiMappingRemovedFields);
-  const moveArmedRow = state.apiMappingMoveArmed ? appRows.find((r) => r.id === state.apiMappingMoveArmed) : null;
-  // Where a brand-new field can be categorized -- Primary/Spouse/Household/
-  // Church plus each one's health section, plus every member slot currently
-  // in play (see addMappingHouseholdMemberSlot) and ITS health section, in
-  // the same order as the Application tab's own categories -- see
-  // newFieldScopeOptions in application-form.js, shared with Manage Form
-  // Fields' own add-field scope <select> below.
-  const newFieldScopes = newFieldScopeOptions(state.apiMappingSlotCount);
+  const d = state.apiMappingDraft;
+  const fields = state.apiMappingFields;
+  const fieldOptions = (selected) => {
+    const known = fields.some((f) => f.gfFieldId === selected);
+    return `
+      <option value="" ${selected ? "" : "selected"}>Not mapped</option>
+      ${selected && !known ? `<option value="${escapeAttr(selected)}" selected>Field ${escapeHtml(selected)} (no longer on the form)</option>` : ""}
+      ${fields.map((f) => `<option value="${escapeAttr(f.gfFieldId)}" ${f.gfFieldId === selected ? "selected" : ""}>${escapeHtml(f.label)}</option>`).join("")}`;
+  };
   const overlay = el(`
     <div class="bm-modal-overlay" id="api-mapping-overlay">
-      <div class="bm-modal bm-api-mapping-modal">
+      <div class="bm-modal">
         <div class="bm-modal-header">
-          <div class="bm-modal-title">Map online form fields</div>
-          <div class="bm-modal-sub">
-            ${
-              moveArmedRow
-                ? `Scroll to where "${escapeHtml(moveArmedRow.label)}" should go, then click a field to drop it right above it — or
-                   <button class="bm-inline-link" id="api-move-top-btn">move to top</button> /
-                   <button class="bm-inline-link" id="api-move-bottom-btn">move to bottom</button>.`
-                : armedField
-                  ? `Click "${escapeHtml(armedField.label)}"'s match on the right, or add it as a new field under:
-                   <span class="bm-api-add-field-scopes">
-                     ${newFieldScopes
-                       .map((s) => `<button class="bm-inline-link" data-add-field-scope="${s.value}">${s.label}</button>`)
-                       .join("")}
-                   </span>`
-                  : `Click a field on the left, then its match on the right, to connect them — click a connected field again to recategorize it elsewhere. Click a row's ⠿ handle to arm it for a long-distance move (scroll, then click where it goes), or drag it a short distance directly.`
-            }
-          </div>
+          <div class="bm-modal-title">Online application mapping</div>
+          <div class="bm-modal-sub">Which answers on the online form fill in each imported application's name, member ID, and start date. Every other answer is in the imported PDF as submitted.</div>
         </div>
-        <div class="bm-modal-body bm-api-mapping-body">
+        <div class="bm-modal-body">
           ${
-            state.apiMappingBusy
-              ? `<div class="bm-tag-hint">Loading form fields…</div>`
-              : state.apiMappingError
-                ? `<div class="bm-appform-badge">${escapeHtml(state.apiMappingError)}</div>`
-                : `${state.apiMappingNotice ? `<div class="bm-appform-badge bm-appform-badge--ok bm-api-mapping-notice">${escapeHtml(state.apiMappingNotice)}</div>` : ""}
-                  <div class="bm-api-connector-container" id="api-mapping-container">
-                    <div class="bm-api-connector-col bm-api-connector-col-left">
-                      ${state.apiMappingFields
-                        .map((f) => {
-                          const target = state.apiMappingConnections[f.gfFieldId];
-                          const targetRow = target ? appRows.find((r) => r.id === target) : null;
-                          return `
-                          <div class="bm-api-field-row${target ? " connected" : ""}${state.apiMappingArmed === f.gfFieldId ? " armed" : ""}" data-gf-field-id="${f.gfFieldId}">
-                            <div class="bm-api-field-text">
-                              <span class="bm-api-field-label">${escapeHtml(f.label)}</span>
-                              ${targetRow ? `<span class="bm-api-field-target">→ ${escapeHtml(targetRow.label)}</span>` : ""}
-                            </div>
-                            ${target ? `<button class="bm-api-field-disconnect" data-disconnect="${f.gfFieldId}" title="Disconnect">${ICONS.x}</button>` : ""}
-                          </div>`;
-                        })
-                        .join("")}
-                    </div>
-                    <svg class="bm-api-connector-svg" id="api-mapping-svg"></svg>
-                    <div class="bm-api-connector-col bm-api-connector-col-right">
-                      ${appRows
-                        .map(
-                          (r) => `
-                        <div class="bm-app-field-row${state.apiMappingMoveArmed === r.id ? " move-armed" : ""}" data-app-field-id="${r.id}">
-                          <span class="bm-api-drag-handle" data-drag-handle="${r.id}" title="Click to arm for a long-distance move, or drag to reorder directly">${ICONS.grip || "⠿"}</span>
-                          <span class="bm-api-field-label" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</span>
-                          ${isFieldRequired(r.id) ? "" : `<button class="bm-api-field-disconnect" data-delete-mapping-field="${r.id}" title="Delete this field">${ICONS.x}</button>`}
-                        </div>`
-                        )
-                        .join("")}
-                      <button class="bm-api-add-slot-btn" id="api-add-slot-btn">${ICONS.plus} Add household member</button>
+            state.apiMappingError
+              ? `<div class="bm-appform-badge">${escapeHtml(state.apiMappingError)}</div>`
+              : state.apiMappingBusy && fields.length === 0
+                ? `<div class="bm-tag-hint">Loading the form's fields…</div>`
+                : `<div class="bm-mapping-grid">
+                    ${MAPPED_RECORD_FIELDS.map(
+                      (m) => `
+                      <div class="bm-field">
+                        <label class="bm-field-label" for="map-${m.key}">${m.label}</label>
+                        <select class="bm-select" id="map-${m.key}" data-map-key="${m.key}">${fieldOptions(d[m.key])}</select>
+                        ${m.hint ? `<div class="bm-field-hint">${m.hint}</div>` : ""}
+                      </div>`
+                    ).join("")}
+                    <div class="bm-field">
+                      <label class="bm-field-label" for="map-plan">File imported applications under</label>
+                      <select class="bm-select" id="map-plan">${planOptionsHtml(d.plan)}</select>
                     </div>
                   </div>`
           }
         </div>
         <div class="bm-modal-footer">
           <button class="bm-btn bm-btn-secondary bm-btn-sm" id="api-mapping-cancel">Cancel</button>
-          <button class="bm-btn bm-btn-primary bm-btn-sm" id="api-mapping-save" ${state.apiMappingBusy || state.apiMappingError ? "disabled" : ""}>Save mapping</button>
+          <button class="bm-btn bm-btn-primary bm-btn-sm" id="api-mapping-save" ${state.apiMappingBusy ? "disabled" : ""}>Save mapping</button>
         </div>
       </div>
     </div>
   `);
-
   overlay.addEventListener("mousedown", (e) => {
     if (e.target === overlay) closeApiMappingModal();
   });
   overlay.querySelector("#api-mapping-cancel").addEventListener("click", closeApiMappingModal);
-  const container = overlay.querySelector("#api-mapping-container");
-  if (container) {
-    container.addEventListener("scroll", positionMappingConnectors);
-    overlay.querySelectorAll(".bm-api-field-row").forEach((row) => {
-      row.addEventListener("click", () => armApiMappingField(row.dataset.gfFieldId));
-    });
-    overlay.querySelectorAll("[data-disconnect]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        disconnectApiMapping(btn.dataset.disconnect);
-      });
-    });
-    overlay.querySelectorAll(".bm-app-field-row").forEach((row) => {
-      row.addEventListener("click", (e) => {
-        if (e.target.closest("[data-drag-handle]") || e.target.closest("[data-delete-mapping-field]")) return;
-        if (state.apiMappingMoveArmed) {
-          moveAppFieldTo(state.apiMappingMoveArmed, row.dataset.appFieldId);
-          return;
-        }
-        connectApiMapping(row.dataset.appFieldId);
-      });
-    });
-    overlay.querySelectorAll("[data-drag-handle]").forEach((handle) => {
-      handle.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        startMappingReorderDrag(handle.dataset.dragHandle, e);
-      });
-    });
-    overlay.querySelectorAll("[data-delete-mapping-field]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        deleteMappingField(btn.dataset.deleteMappingField);
-      });
-    });
-    const addSlotBtn = overlay.querySelector("#api-add-slot-btn");
-    if (addSlotBtn) addSlotBtn.addEventListener("click", addMappingHouseholdMemberSlot);
-  }
-  overlay.querySelectorAll("[data-add-field-scope]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      addMappingCustomField(btn.dataset.addFieldScope);
-    });
+  overlay.querySelector("#api-mapping-save").addEventListener("click", saveApiMapping);
+  overlay.querySelectorAll("[data-map-key]").forEach((sel) => {
+    sel.addEventListener("change", () => (state.apiMappingDraft[sel.dataset.mapKey] = sel.value));
   });
-  const moveTopBtn = overlay.querySelector("#api-move-top-btn");
-  if (moveTopBtn) moveTopBtn.addEventListener("click", () => moveArmedToEdge("top"));
-  const moveBottomBtn = overlay.querySelector("#api-move-bottom-btn");
-  if (moveBottomBtn) moveBottomBtn.addEventListener("click", () => moveArmedToEdge("bottom"));
-  const saveBtn = overlay.querySelector("#api-mapping-save");
-  if (saveBtn) saveBtn.addEventListener("click", saveApiMapping);
+  overlay.querySelector("#map-plan")?.addEventListener("change", (e) => (state.apiMappingDraft.plan = e.target.value));
   return overlay;
 }
 
-// ---- Manage Form Fields ----
-// Independent of any API connection (unlike the mapping modal above) -- a
-// paper-only folder still needs to be able to add, delete, require, or
-// reorder fields as the org's real paper form changes over time.
-// Reads/writes the same .form-schema.json the mapping modal's App-side list,
-// customFields, and appFieldOrder come from, so the two screens never
-// disagree about what fields exist or what order they're in.
+// ---- Plans ----
+// The rail's Plans > Manage: add a plan, remove one nothing uses any more,
+// and the one-time import of the old Member Tracker spreadsheet. The list
+// lives in the folder's .plans.json (see main.js's readPlans); which plan
+// an application belongs to is its own record's `plan`.
 
-function openManageFieldsModal() {
-  state.manageFieldsDraft = JSON.parse(
-    JSON.stringify(
-      state.formSchema || { removedFields: [], requiredFields: DEFAULT_REQUIRED_FIELDS, customFields: [], appFieldOrder: [] }
-    )
-  );
-  state.manageFieldsNewLabel = "";
-  state.manageFieldsNewScope = "household";
-  state.manageFieldsModalOpen = true;
+function openPlansModal() {
+  if (state.tagModalOpen) closeTagManager(false);
+  if (state.aboutOpen) closeAbout();
+  if (state.settingsModalOpen) closeSettingsModal();
+  state.plansDraft = [...state.plans];
+  state.plansNewName = "";
+  state.plansModalOpen = true;
   render();
 }
 
-function closeManageFieldsModal() {
-  state.manageFieldsModalOpen = false;
-  state.manageFieldsDraft = null;
+function closePlansModal() {
+  state.plansModalOpen = false;
+  state.plansDraft = null;
   render();
 }
 
-function toggleManageFieldRequired(target) {
-  const d = state.manageFieldsDraft;
-  const idx = d.requiredFields.indexOf(target);
-  if (idx === -1) d.requiredFields.push(target);
-  else d.requiredFields.splice(idx, 1);
-  render();
-}
-
-// One delete action for every field, built-in or custom -- there's no
-// "remove and maybe restore later" concept: once a field is deleted here,
-// it's gone from the Application tab/mapping modal/this list for good (a
-// built-in field's target just joins removedFields with no UI ever offered
-// to undo that, since a field that shouldn't be on the form -- e.g. a
-// spouse's "marital status", which is always "married" by definition --
-// isn't coming back). A required field can't be deleted until it's
-// unmarked first -- the one rule that makes "required" mean something.
-// Warns first if the online form's field mapping still points at it; the
-// actual retarget-to-"ignore" happens in saveManageFields once this is
-// confirmed and the field is really gone from the draft.
-function deleteManageField(target, label) {
-  const d = state.manageFieldsDraft;
-  if (d.requiredFields.includes(target)) {
-    alert("This field is required, so it can't be deleted yet. Uncheck Required first.");
+function addDraftPlan() {
+  const name = state.plansNewName.trim();
+  if (!name) return;
+  if (state.plansDraft.some((p) => p.toLowerCase() === name.toLowerCase())) {
+    alert(`There's already a plan named "${name}".`);
     return;
   }
-  const customField = d.customFields.find((c) => customFieldTarget(c) === target);
-  const connected = state.apiConfig ? (state.apiConfig.fieldMapping || []).filter((m) => m.target === target) : [];
-  if (connected.length > 0) {
-    const names = connected.map((m) => m.label || m.gfFieldId).join(", ");
-    if (!confirm(`"${names}" on the online form is still mapped to "${label}". Delete it and disconnect that mapping?`)) return;
-  } else if (!confirm(`Delete "${label}"? This can't be undone.`)) {
+  state.plansDraft.push(name);
+  state.plansNewName = "";
+  render();
+  document.getElementById("plans-new-name")?.focus();
+}
+
+async function savePlansDraft() {
+  const prev = [...state.plans];
+  const next = [...state.plansDraft];
+  closePlansModal();
+  if (JSON.stringify(prev) === JSON.stringify(next)) return;
+  state.plans = await window.api.savePlans(state.folder, next);
+  if (state.activePlan && !state.plans.includes(state.activePlan) && planRecords(state.activePlan).length === 0) state.activePlan = null;
+  pushUndo("Edit plans", () => window.api.savePlans(state.folder, prev));
+}
+
+async function importTrackerSpreadsheet() {
+  if (state.plansModalOpen) closePlansModal();
+  let result;
+  try {
+    result = await window.api.importTrackerXlsx(state.folder);
+  } catch (e) {
+    alert(`Couldn't import that spreadsheet:\n${e.message || e}`);
     return;
   }
-  if (customField) d.customFields = d.customFields.filter((c) => c !== customField);
-  else if (!d.removedFields.includes(target)) d.removedFields.push(target);
-  d.requiredFields = d.requiredFields.filter((t) => t !== target);
-  render();
-}
-
-// A quick bulk version of deleteManageField, scoped to exactly one kind of
-// field (a condition's "$5,000+/yr" checkbox) across every member currently
-// in play -- CONDITION_CATEGORIES' 41 conditions x however many members
-// (primary/spouse/each slot) adds up fast, and clicking Delete on each one
-// individually is the exact tedium this exists to skip. Same underlying
-// mechanism as a single delete (the target just joins removedFields, real
-// for good once Save is clicked) -- a required field is left alone rather
-// than forced, matching deleteManageField's own rule, and any online-form
-// mapping still pointed at one of these gets disconnected the same generic
-// way saveManageFields already handles any removed target, not something
-// this function needs to know about itself.
-function removeAllHealthExpenseFields() {
-  const d = state.manageFieldsDraft;
-  const slotCount = manageFieldsSlotCount(d.customFields);
-  const scopes = ["primary", "spouse", ...Array.from({ length: Math.max(0, slotCount - 1) }, (_, i) => `slot${i + 2}`)];
-  const targets = [];
-  scopes.forEach((scope) => {
-    CONDITION_CATEGORIES.forEach((cat) => {
-      cat.conditions.forEach((c) => targets.push(`member:${scope}.health.conditions.${cat.key}.${c.key}.expense5k`));
-    });
-  });
-  const removable = targets.filter((t) => !d.requiredFields.includes(t) && !d.removedFields.includes(t));
-  if (removable.length === 0) {
-    alert('No "$5,000+/yr" fields left to remove.');
-    return;
-  }
-  if (
-    !confirm(
-      `Remove all ${removable.length} "$5,000+/yr" condition fields across every member? This can't be undone -- any online form field still mapped to one of them will be disconnected once you click Save.`
-    )
-  ) {
-    return;
-  }
-  d.removedFields.push(...removable);
-  render();
-}
-
-// Moves a row up/down among its own scope's siblings only (Primary's fields
-// reorder independently of Spouse's, etc. -- there's no cross-scope
-// reordering UI here, unlike the mapping modal's one flat list) by editing
-// just that scope's slice of the single shared appFieldOrder array, so
-// every other scope's relative order is left untouched.
-function moveManageFieldRow(scope, rowId, direction) {
-  const d = state.manageFieldsDraft;
-  const slotCount = manageFieldsSlotCount(d.customFields);
-  const fullRows = buildAppFieldRows(slotCount, d.customFields, d.appFieldOrder || [], d.removedFields);
-  const fullOrder = fullRows.map((r) => r.id);
-  const scopeIndices = [];
-  fullRows.forEach((row, i) => {
-    if (rowBelongsToScope(row, scope)) scopeIndices.push(i);
-  });
-  const posInScope = scopeIndices.findIndex((i) => fullOrder[i] === rowId);
-  const swapWith = direction === "up" ? posInScope - 1 : posInScope + 1;
-  if (posInScope === -1 || swapWith < 0 || swapWith >= scopeIndices.length) return;
-  const i1 = scopeIndices[posInScope];
-  const i2 = scopeIndices[swapWith];
-  [fullOrder[i1], fullOrder[i2]] = [fullOrder[i2], fullOrder[i1]];
-  d.appFieldOrder = fullOrder;
-  render();
-}
-
-function addManageField() {
-  const d = state.manageFieldsDraft;
-  const label = state.manageFieldsNewLabel.trim();
-  if (!label) return;
-  const usedKeys = new Set(d.customFields.map((c) => c.key));
-  const key = slugifyFieldKey(label, usedKeys);
-  d.customFields.push({ key, label, scope: state.manageFieldsNewScope });
-  state.manageFieldsNewLabel = "";
-  render();
-}
-
-async function saveManageFields() {
-  const draft = state.manageFieldsDraft;
-  state.formSchema = await window.api.saveFormSchema(state.folder, draft);
-  state.customFieldDefs = state.formSchema.customFields || [];
-
-  // A field deleted above (built-in or custom) may still be "connected" in
-  // the online form's field mapping -- since deleting is now permanent,
-  // scrub any fieldMapping row pointing at it back to "ignore" rather than
-  // leaving it silently pointed at a target that no longer exists anywhere.
-  if (state.apiConfig && Array.isArray(state.apiConfig.fieldMapping)) {
-    const survivingCustomTargets = new Set(state.formSchema.customFields.map((c) => customFieldTarget(c)));
-    const deletedTargets = new Set(state.formSchema.removedFields || []);
-    let changed = false;
-    const fieldMapping = state.apiConfig.fieldMapping.map((m) => {
-      const isCustomTarget = (m.target || "").startsWith("membercustom:") || (m.target || "").startsWith("custom:");
-      const targetGone = m.target && m.target !== "ignore" && ((isCustomTarget && !survivingCustomTargets.has(m.target)) || deletedTargets.has(m.target));
-      if (targetGone) {
-        changed = true;
-        return { ...m, target: "ignore" };
-      }
-      return m;
-    });
-    if (changed) {
-      state.apiConfig = await window.api.saveApiConfig(state.folder, { ...state.apiConfig, fieldMapping });
-    }
-  }
-
-  closeManageFieldsModal();
+  if (!result) return; // picker canceled
   await refreshFiles();
+  if (result.addedIds.length > 0) {
+    pushUndo(`Import ${result.addedIds.length} rows from ${result.file}`, () =>
+      Promise.all(result.addedIds.map((id) => window.api.deleteRecord(state.folder, id)))
+    );
+  }
+  const lines = result.perPlan.map(
+    (p) => `• ${p.plan}: ${p.added} added${p.duplicates ? `, ${p.duplicates} already here (skipped)` : ""}`
+  );
+  if (result.perPlan.length === 0) lines.push("No member sheets were found — the workbook needs a sheet with a Name column.");
+  if (result.futureDated > 0) {
+    lines.push(
+      "",
+      `${result.futureDated} row${result.futureDated === 1 ? " had" : "s had"} an entry date in the future — taken to be the member start date, with the entry date set to today.`
+    );
+  }
+  alert(`Imported ${result.file}:\n\n${lines.join("\n")}`);
 }
 
-function renderManageFieldsModal() {
-  const d = state.manageFieldsDraft;
-  const sections = buildManageFieldSections(manageFieldsSlotCount(d.customFields), d.customFields, d.appFieldOrder || [], d.removedFields);
-  const scopeOptions = newFieldScopeOptions(manageFieldsSlotCount(d.customFields));
-  // A custom field's type (see effectiveCustomFieldType in
-  // application-form.js) -- Text or Checkbox for any custom field, plus
-  // List for one that's already a list (a List's columns come from the
-  // online form, so there's no way to define one from scratch here). A
-  // field connected to the online form takes the online field's type
-  // instead (see customFieldPresentation), so it just says which.
-  const GF_KIND_LABELS = { text: "Text", textarea: "Paragraph", select: "Dropdown", multiselect: "Multi-select", checkbox: "Checkbox", date: "Date", number: "Number", list: "List" };
-  const renderTypeSelect = (row) => {
-    const def = row.isCustom ? d.customFields.find((c) => c.key === row.customKey) : null;
-    if (!def) return "";
-    const gf = gfPresentationForTarget(state.apiConfig?.fieldMapping, customFieldTarget(def));
-    if (gf) {
-      return `<span class="bm-manage-field-type bm-manage-field-type-fixed" title="Set by the online form's field">${GF_KIND_LABELS[gf.kind] || "Text"} (online)</span>`;
-    }
-    const current = def.type || "text";
-    const options = [
-      { value: "text", label: "Text" },
-      { value: "checkbox", label: "Checkbox" },
-      ...(current === "list" ? [{ value: "list", label: "List" }] : []),
-    ];
-    return `<select class="bm-select bm-manage-field-type" data-type-key="${escapeHtml(def.key)}" title="Field type">
-      ${options.map((o) => `<option value="${o.value}" ${current === o.value ? "selected" : ""}>${o.label}</option>`).join("")}
-    </select>`;
-  };
-  const renderRow = (row, scope, idx, total) => {
-    const required = d.requiredFields.includes(row.id);
-    return `
-      <div class="bm-manage-field-row">
-        <span class="bm-manage-field-reorder">
-          <button class="bm-manage-field-reorder-btn" data-move-target="${row.id}" data-move-scope="${scope}" data-move-dir="up" ${idx === 0 ? "disabled" : ""} title="Move up">${ICONS.sortAsc}</button>
-          <button class="bm-manage-field-reorder-btn" data-move-target="${row.id}" data-move-scope="${scope}" data-move-dir="down" ${idx === total - 1 ? "disabled" : ""} title="Move down">${ICONS.sortDesc}</button>
-        </span>
-        <label class="bm-checkbox-label bm-manage-field-required">
-          <input type="checkbox" data-require-target="${row.id}" ${required ? "checked" : ""} />
-          Required
-        </label>
-        <span class="bm-manage-field-label" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span>
-        ${renderTypeSelect(row)}
-        <button class="bm-btn bm-btn-ghost bm-btn-sm" data-delete-target="${row.id}" data-delete-label="${escapeHtml(row.label)}">${ICONS.x} Delete</button>
-      </div>`;
-  };
+function renderPlansModal() {
+  const draft = state.plansDraft;
+  const counts = new Map(draft.map((p) => [p, planRecords(p).length]));
   const overlay = el(`
-    <div class="bm-modal-overlay" id="manage-fields-overlay">
-      <div class="bm-modal bm-manage-fields-modal">
+    <div class="bm-modal-overlay" id="plans-modal-overlay">
+      <div class="bm-modal">
         <div class="bm-modal-header">
-          <div class="bm-modal-title">Manage Form Fields</div>
-          <div class="bm-modal-sub">
-            Add, delete, require, or reorder fields on the Application tab -- works whether or not this folder is connected to the online form. Deleting a field is permanent.
-            <button class="bm-inline-link" id="manage-fields-remove-expense-btn">Remove all "$5,000+/yr" fields</button>
-          </div>
+          <div class="bm-modal-title">Plans</div>
+          <div class="bm-modal-sub">The plans an application can be filed under. Saved into this folder, so every computer pointed at it sees the same list.</div>
         </div>
-        <div class="bm-modal-body bm-manage-fields-body" id="manage-fields-body">
-          ${sections
-            .map(
-              (s) => `
-            <div class="bm-manage-field-section">
-              <div class="bm-section-label">${escapeHtml(s.group)}</div>
-              ${s.rows.map((row, idx) => renderRow(row, s.scope, idx, s.rows.length)).join("") || `<div class="bm-rail-empty">No fields yet</div>`}
-            </div>`
-            )
-            .join("")}
-          <div class="bm-manage-field-section">
-            <div class="bm-section-label">Add a field</div>
-            <div class="bm-manage-field-add-row">
-              <input class="bm-input" id="manage-field-new-label" placeholder="Field label" value="${escapeHtml(state.manageFieldsNewLabel)}" />
-              <select class="bm-select" id="manage-field-new-scope">
-                ${scopeOptions.map((o) => `<option value="${o.value}" ${state.manageFieldsNewScope === o.value ? "selected" : ""}>${o.label}</option>`).join("")}
-              </select>
-              <button class="bm-btn bm-btn-secondary bm-btn-sm" id="manage-field-add-btn">${ICONS.plus} Add</button>
-            </div>
+        <div class="bm-modal-body">
+          <div class="bm-plan-list">
+            ${draft
+              .map((p, i) => {
+                const n = counts.get(p) || 0;
+                return `
+              <div class="bm-plan-row">
+                <span class="bm-plan-row-name">${escapeHtml(p)}</span>
+                <span class="bm-plan-row-count">${n} application${n === 1 ? "" : "s"}</span>
+                <button class="bm-icon-btn" data-remove-plan="${i}" ${n > 0 ? "disabled" : ""} title="${n > 0 ? "Only a plan no application uses can be removed" : "Remove this plan"}">${ICONS.x}</button>
+              </div>`;
+              })
+              .join("")}
+          </div>
+          <div class="bm-field-row bm-plan-add-row">
+            <input class="bm-input" id="plans-new-name" placeholder="New plan name" value="${escapeAttr(state.plansNewName)}" />
+            <button class="bm-btn bm-btn-secondary bm-btn-sm" id="plans-add-btn">${ICONS.plus} Add plan</button>
+          </div>
+          <div class="bm-plan-import">
+            <div class="bm-section-label">Old tracker spreadsheet</div>
+            <div class="bm-tag-hint">Brings each "&lt;Plan&gt; Members" sheet of the old Member Tracker workbook in as tracker rows (with no file attached). Rows already here are skipped, so it's safe to run again.</div>
+            <button class="bm-btn bm-btn-secondary bm-btn-sm" id="plans-import-xlsx">${ICONS.upload} Import spreadsheet…</button>
           </div>
         </div>
         <div class="bm-modal-footer">
-          <button class="bm-btn bm-btn-secondary bm-btn-sm" id="manage-fields-cancel">Cancel</button>
-          <button class="bm-btn bm-btn-primary bm-btn-sm" id="manage-fields-save">Save</button>
+          <button class="bm-btn bm-btn-secondary bm-btn-sm" id="plans-cancel">Cancel</button>
+          <button class="bm-btn bm-btn-primary bm-btn-sm" id="plans-save">Save</button>
         </div>
       </div>
     </div>
   `);
-
   overlay.addEventListener("mousedown", (e) => {
-    if (e.target === overlay) closeManageFieldsModal();
+    if (e.target === overlay) closePlansModal();
   });
-  overlay.querySelector("#manage-fields-cancel").addEventListener("click", closeManageFieldsModal);
-  overlay.querySelector("#manage-fields-save").addEventListener("click", saveManageFields);
-  overlay.querySelector("#manage-fields-remove-expense-btn").addEventListener("click", removeAllHealthExpenseFields);
-  overlay.querySelectorAll("[data-require-target]").forEach((input) => {
-    input.addEventListener("change", () => toggleManageFieldRequired(input.dataset.requireTarget));
+  overlay.querySelector("#plans-cancel").addEventListener("click", closePlansModal);
+  overlay.querySelector("#plans-save").addEventListener("click", savePlansDraft);
+  overlay.querySelector("#plans-import-xlsx").addEventListener("click", importTrackerSpreadsheet);
+  const input = overlay.querySelector("#plans-new-name");
+  input.addEventListener("input", () => (state.plansNewName = input.value));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addDraftPlan();
   });
-  overlay.querySelectorAll("[data-move-target]").forEach((btn) => {
-    btn.addEventListener("click", () => moveManageFieldRow(btn.dataset.moveScope, btn.dataset.moveTarget, btn.dataset.moveDir));
-  });
-  overlay.querySelectorAll("[data-delete-target]").forEach((btn) => {
-    btn.addEventListener("click", () => deleteManageField(btn.dataset.deleteTarget, btn.dataset.deleteLabel));
-  });
-  overlay.querySelectorAll("[data-type-key]").forEach((select) => {
-    select.addEventListener("change", () => {
-      const def = d.customFields.find((c) => c.key === select.dataset.typeKey);
-      if (!def) return;
-      if (select.value === "text") delete def.type;
-      else def.type = select.value;
+  overlay.querySelector("#plans-add-btn").addEventListener("click", addDraftPlan);
+  overlay.querySelectorAll("[data-remove-plan]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.plansDraft.splice(Number(btn.dataset.removePlan), 1);
+      render();
     });
   });
-  overlay.querySelector("#manage-field-new-label").addEventListener("input", (e) => {
-    state.manageFieldsNewLabel = e.target.value;
-  });
-  overlay.querySelector("#manage-field-new-scope").addEventListener("change", (e) => {
-    state.manageFieldsNewScope = e.target.value;
-  });
-  overlay.querySelector("#manage-field-add-btn").addEventListener("click", addManageField);
   return overlay;
 }
 
@@ -4614,9 +4702,8 @@ async function runApiImport() {
           result.errors.map((e) => `#${e.id}: ${e.error}`).join("\n")
       );
     }
-    // The import refreshes the saved mapping's online field types/choices
-    // (see enrichFieldMapping in main.js's import-gf-entries), which drive
-    // how the Application tab shows each field -- pick it back up.
+    // The import records each entry's imported file (importedEntries) --
+    // pick that back up.
     state.apiConfig = await window.api.getApiConfig(state.folder);
     closeApiImportModal();
     await refreshFiles();
@@ -4798,7 +4885,6 @@ function renderCommenterNameModal() {
   state.abAppsName = (await window.api.getAbAppsName()) || "";
   if (!commentSignerName()) state.commenterModalOpen = true;
   window.api.onAbAppsName((name) => setAbAppsName(name));
-  state.autoexportFolder = (await window.api.getAutoexportFolder()) || "";
   window.api.onUpdateStatus((status) => setUpdateStatus(status));
   window.api.onRollbackStatus((status) => {
     state.rollbackStatus = status;
