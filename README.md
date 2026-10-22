@@ -100,8 +100,8 @@ per platform automatically, so this can be run entirely from Windows.
   than staying tied to one machine's install of the app. It's skipped by the
   file grid and folder tree like any other dotfile.
 - Each application's record — Plan, Name, Member ID, Application Entry
-  Date, Member Start Date, and Member Card Sent (the date the card was
-  marked sent is recorded automatically) — is edited in the
+  Date, Member Start Date, and Member Card Sent (checking it fills in
+  today as the sent date, which can then be edited) — is edited in the
   preview pane's Application section or straight in the Tracker, and saved
   into a hidden per-file sidecar next to the source file itself, named
   `.<filename>.appform.json` — e.g. `Smith Family Scan.pdf` gets a

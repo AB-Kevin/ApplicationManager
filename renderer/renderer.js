@@ -849,8 +849,8 @@ function setRecordFields(row, patch, label = "Edit application") {
   pushUndo(label, () => restoreSnapshots([snap]));
 }
 
-// The card's sent date is recorded automatically — the checkbox is all
-// anyone has to touch.
+// Checking the box stamps today as the card's sent date; the date input
+// beside it (shown while checked) can then be changed to the real day.
 function setCardSent(row, checked) {
   setRecordFields(row, { cardSent: checked, cardSentDate: checked ? todayIso() : "" }, checked ? "Mark card sent" : "Mark card not sent");
 }
@@ -2378,7 +2378,7 @@ function sortTrackerRows(rows) {
   const value = (row) => {
     const r = row.record;
     if (key === "entryDate" || key === "startDate") return r[key] || "9999-99-99"; // blank (not entered yet) sorts as newest
-    if (key === "cardSent") return r.cardSent ? 1 : 0;
+    if (key === "cardSent") return r.cardSent ? `1${r.cardSentDate}` : "0"; // sent rows ordered by their sent date
     if (key === "status") return TRACKER_STATUS_ORDER[recordStatus(r)];
     if (key === "file") return text(row.file ? row.file.name : "");
     if (key === "name") return text(r.name || (row.file ? row.file.name : ""));
@@ -2429,7 +2429,16 @@ function renderTrackerRowHtml(row, showPlanCol) {
         </div>
       </td>
       <td><input class="bm-cell-input bm-cell-date${r.startDate ? "" : " is-empty"}" type="date" id="${id("startDate")}" data-cell="startDate" data-kind="date" value="${escapeAttr(r.startDate)}" /></td>
-      <td class="bm-cell-center"><input type="checkbox" class="bm-cell-check" id="${id("cardSent")}" data-cell="cardSent" ${r.cardSent ? "checked" : ""} title="${r.cardSent && r.cardSentDate ? `Sent ${escapeAttr(formatDisplayDate(r.cardSentDate))}` : "Member card sent"}" /></td>
+      <td>
+        <div class="bm-cell-date-wrap">
+          <input type="checkbox" class="bm-cell-check" id="${id("cardSent")}" data-cell="cardSent" ${r.cardSent ? "checked" : ""} title="Member card sent" />
+          ${
+            r.cardSent
+              ? `<input class="bm-cell-input bm-cell-date${r.cardSentDate ? "" : " is-empty"}" type="date" id="${id("cardSentDate")}" data-cell="cardSentDate" data-kind="date" aria-label="Date the card was sent" value="${escapeAttr(r.cardSentDate)}" />`
+              : ""
+          }
+        </div>
+      </td>
       <td><span class="bm-status bm-status--${status}">${statusLabel(status)}</span></td>
       <td class="bm-cell-file">
         ${

@@ -243,10 +243,17 @@ function renderApplicationFieldsHtml(row) {
             <button class="bm-btn bm-btn-secondary bm-btn-sm" id="app-entry-today" ${rec.entryDate === todayIso() ? "disabled" : ""}>Today</button>
           </div>
         </div>
-        <label class="bm-checkbox-label bm-appfields-wide">
-          <input type="checkbox" id="app-card-sent" ${rec.cardSent ? "checked" : ""} />
-          Member card sent${rec.cardSent && rec.cardSentDate ? `<span class="bm-appfields-caption">on ${formatDisplayDate(rec.cardSentDate)}</span>` : ""}
-        </label>
+        <div class="bm-field-row bm-appfields-wide bm-appfields-card">
+          <label class="bm-checkbox-label">
+            <input type="checkbox" id="app-card-sent" ${rec.cardSent ? "checked" : ""} />
+            Member card sent
+          </label>
+          ${
+            rec.cardSent
+              ? `<input class="bm-input bm-appfields-date" id="app-card-sent-date" type="date" data-app-field="cardSentDate" data-kind="date" aria-label="Date the card was sent" value="${escapeAttr(rec.cardSentDate)}" />`
+              : ""
+          }
+        </div>
       </div>
     </div>`;
 }

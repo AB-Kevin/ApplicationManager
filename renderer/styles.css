@@ -713,7 +713,8 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-appfields-wide { grid-column: 1 / -1; }
 .bm-appfields-grid .bm-field-row { flex-wrap: nowrap; }
 .bm-appfields-grid .bm-appfields-date { flex: 1; }
-.bm-appfields-caption { color: var(--text-caption); font-size: 12px; margin-left: 4px; }
+.bm-appfields-card { min-height: 34px; }
+.bm-appfields-card .bm-checkbox-label { flex-shrink: 0; }
 .bm-bulk-actions { margin-top: var(--space-3); }
 
 /* Nothing selected. Two shapes (see renderPreviewEmpty): no folder open at
@@ -906,7 +907,7 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 /* Fixed layout so each column keeps its set width (Name takes whatever's
    left); below min-width the table scrolls sideways instead of squeezing
    cells. */
-.bm-tracker { width: 100%; min-width: 1300px; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.bm-tracker { width: 100%; min-width: 1400px; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 13px; }
 .bm-tracker thead th {
   position: sticky; top: 0; z-index: 1; background: var(--surface-page); text-align: left; padding: 0;
   border-bottom: 2px solid var(--border-rule);
@@ -923,7 +924,7 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-tracker-th-memberId { width: 104px; }
 .bm-tracker-th-entryDate { width: 196px; }
 .bm-tracker-th-startDate { width: 144px; }
-.bm-tracker-th-cardSent { width: 76px; }
+.bm-tracker-th-cardSent { width: 172px; }
 .bm-tracker-th-status { width: 132px; }
 .bm-tracker-th-file { width: 180px; }
 /* Cells read as plain text until hovered or focused, like a spreadsheet. */
@@ -952,6 +953,7 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-cell-today:hover { background: var(--green-100); }
 .bm-cell-center { text-align: center; }
 .bm-cell-check { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent-text); }
+.bm-cell-date-wrap .bm-cell-check { flex-shrink: 0; margin: 0 4px 0 6px; }
 .bm-cell-file { white-space: nowrap; overflow: hidden; }
 .bm-cell-file-link {
   background: none; border: none; padding: 0; cursor: pointer; font-family: var(--font-sans); font-size: 12.5px; color: var(--accent-text);
