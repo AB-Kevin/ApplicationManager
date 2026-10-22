@@ -1,6 +1,6 @@
 {
   "name": "applicationmanager-file-manager",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "ApplicationManager - a holding space and member tracker for Member Applications",
   "main": "main.js",
   "author": "",
