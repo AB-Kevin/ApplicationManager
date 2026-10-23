@@ -152,9 +152,10 @@ per platform automatically, so this can be run entirely from Windows.
   fully processed. Clearing the date — or undoing it — moves the file back
   to `Inbox`. A same-named file already there gets a " (1)" suffix rather
   than being overwritten.
-- Summary: per plan, the running totals plus the old spreadsheet's monthly
-  (for a chosen year) and weekly (last 10 weeks) tables, counted by
-  Application Entry Date. "Export to Excel" (Tracker or Summary) saves a
+- Summary: per plan, the running totals plus line charts of the old
+  spreadsheet's monthly (for a chosen year) and weekly (last 10 weeks)
+  numbers, counted by Application Entry Date. Hover a chart for a period's
+  values, or open "Show numbers" under it for the table. "Export to Excel" (Tracker or Summary) saves a
   workbook with a Members sheet and a Summary sheet per plan in scope; the
   Members sheet's Comments column holds each row's comments, and imports
   back in as separate comments.

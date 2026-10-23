@@ -60,6 +60,14 @@
   --brand-maroon: var(--maroon-500);
   --overlay-scrim: rgba(35, 31, 32, 0.45);
 
+  /* Application status (the status dots, and the Summary chart's lines).
+     Pending is re-stepped lighter in the dark themes so it holds 3:1 on their
+     surfaces and stays apart from the green under color-vision deficiency
+     (checked with the dataviz palette validator). */
+  --status-awaiting: #b07a2a;
+  --status-pending: #3b6fc0;
+  --status-complete: var(--accent-text);
+
   /* Type */
   --font-sans: "Poppins", "Intelo Alt", "Nunito Sans", system-ui, sans-serif;
   --font-condensed: "Barlow Condensed", "Acumin Pro Condensed", "Oswald", var(--font-sans);
@@ -108,6 +116,7 @@
   --green-100: #24352d;
   --green-050: #1e2b25;
   --overlay-scrim: rgba(0, 0, 0, 0.6);
+  --status-pending: #6b9be0;
 }
 
 /* ---- Midnight ----
@@ -142,6 +151,7 @@
   --on-rail: var(--green-500); /* rail/About text reads mint instead of white */
   --rail-active-bg: #3a3d40; /* neutral gray highlight — no white pop in an all-gray theme */
   --overlay-scrim: rgba(0, 0, 0, 0.65);
+  --status-pending: #6b9be0;
 }
 
 * { box-sizing: border-box; }
@@ -696,9 +706,9 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
   border: 1px solid var(--border-hairline); border-radius: 999px; padding: 2px 9px 2px 7px; background: var(--surface-card);
 }
 .bm-status::before, .bm-status-dot { content: ""; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
-.bm-status--awaiting::before, .bm-status-dot--awaiting { background: #b07a2a; }
-.bm-status--pending::before, .bm-status-dot--pending { background: #4a6fa5; }
-.bm-status--complete::before, .bm-status-dot--complete { background: var(--accent-text); }
+.bm-status--awaiting::before, .bm-status-dot--awaiting { background: var(--status-awaiting); }
+.bm-status--pending::before, .bm-status-dot--pending { background: var(--status-pending); }
+.bm-status--complete::before, .bm-status-dot--complete { background: var(--status-complete); }
 
 /* ---- Application fields (application-form.js's renderApplicationFieldsHtml) ---- */
 .bm-appform-badge {
@@ -974,7 +984,7 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-summary-tile { border: 1px solid var(--border-hairline); border-radius: var(--radius-control); padding: var(--space-3) var(--space-4); background: var(--surface-card); }
 .bm-summary-tile-label { display: flex; align-items: center; gap: 6px; font-family: var(--font-condensed); font-size: 12px; letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-caption); }
 .bm-summary-tile-value { font-size: 28px; font-weight: 600; color: var(--text-body); font-variant-numeric: tabular-nums; margin-top: 2px; }
-.bm-summary-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: var(--space-6); }
+.bm-summary-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: var(--space-6); }
 .bm-summary-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .bm-summary-table th {
   text-align: left; font-family: var(--font-condensed); font-size: 12px; letter-spacing: var(--tracking-label); text-transform: uppercase;
@@ -985,10 +995,57 @@ a:hover { color: var(--green-700); border-bottom-color: var(--green-500); }
 .bm-summary-table .bm-num { text-align: right; font-variant-numeric: tabular-nums; }
 .bm-summary-table .bm-num-strong { font-weight: 600; }
 .bm-summary-current td:first-child { color: var(--accent-text); font-weight: 600; }
-.bm-summary-bar-col { width: 28%; }
-/* One series (new applications), so no legend: the column header names it.
-   Rounded data end, square at the baseline. */
-.bm-summary-bar { height: 10px; min-width: 3px; background: var(--accent-text); border-radius: 0 4px 4px 0; }
+.bm-summary-details { margin-top: var(--space-3); }
+.bm-summary-details > summary { cursor: pointer; font-size: 12px; color: var(--accent-text); width: max-content; }
+.bm-summary-details[open] > summary { margin-bottom: var(--space-2); }
+
+/* ---- Summary line charts (renderSummaryChartHtml) ----
+   The plot is a fixed-height box with a fluid width: the lines are an SVG
+   stretched to fill it (non-scaling strokes keep them 2px), and everything
+   that has to stay round or legible -- dots, tick labels, the readout -- is
+   HTML positioned in % across and px down. Each piece carries its series
+   via .bm-series--*, which sets --series-color; text never wears it. */
+.bm-series--new { --series-color: var(--text-body); }
+.bm-series--complete { --series-color: var(--status-complete); }
+.bm-series--pending { --series-color: var(--status-pending); }
+.bm-chart { margin: 0; }
+.bm-chart-legend { display: flex; flex-wrap: wrap; gap: 4px var(--space-4); font-size: 12px; color: var(--text-muted); margin-bottom: var(--space-3); }
+.bm-chart-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.bm-chart-key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; background: var(--series-color); flex-shrink: 0; }
+/* Left gutter for the y ticks, right gutter for the end-of-line values. */
+.bm-chart-plot, .bm-chart-x { position: relative; margin-left: 28px; margin-right: 32px; }
+.bm-chart-plot { margin-top: 8px; }
+.bm-chart-grid { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--border-hairline); }
+.bm-chart-ytick, .bm-chart-xtick, .bm-chart-end-label { position: absolute; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bm-chart-ytick { left: -8px; transform: translate(-100%, -50%); color: var(--text-caption); }
+.bm-chart-lines { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.bm-chart-line { fill: none; stroke: var(--series-color); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.bm-chart-dot {
+  position: absolute; width: 8px; height: 8px; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none;
+  background: var(--series-color); box-shadow: 0 0 0 2px var(--surface-page);
+}
+.bm-chart-end-label { transform: translate(8px, -50%); color: var(--text-body); font-weight: 600; pointer-events: none; }
+.bm-chart-empty { position: absolute; left: 0; right: 0; top: 40%; text-align: center; font-size: 12px; color: var(--text-caption); pointer-events: none; }
+.bm-chart-x { height: 18px; margin-top: 6px; }
+.bm-chart-xtick { top: 0; transform: translateX(-50%); color: var(--text-caption); }
+.bm-chart-xtick.is-current { color: var(--accent-text); font-weight: 600; }
+/* Hover layer (wireSummaryCharts): one transparent, full-height target per
+   period, so the pointer only has to be in the right column, not on a line. */
+.bm-chart-hit { position: absolute; top: -8px; bottom: -8px; z-index: 3; outline: none; }
+.bm-chart-hit:focus-visible { box-shadow: inset 0 0 0 2px var(--focus-ring); border-radius: var(--radius-control); }
+.bm-chart-hover { display: none; }
+.bm-chart-plot.is-hover .bm-chart-hover { display: block; }
+.bm-chart-crosshair { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--gray-400); pointer-events: none; }
+.bm-chart-dot.bm-chart-hover { z-index: 1; }
+.bm-chart-tip {
+  position: absolute; top: 0; z-index: 2; transform: translateX(12px); pointer-events: none; white-space: nowrap;
+  background: var(--surface-card); border: 1px solid var(--border-hairline); border-radius: var(--radius-control);
+  box-shadow: var(--shadow-popover); padding: 8px 10px; font-size: 12px; color: var(--text-muted);
+}
+.bm-chart-tip.is-flipped { transform: translateX(calc(-100% - 12px)); }
+.bm-chart-tip-title { font-size: 11.5px; color: var(--text-caption); margin-bottom: 4px; }
+.bm-chart-tip-row { display: flex; align-items: center; gap: 6px; line-height: 1.6; }
+.bm-chart-tip-row strong { min-width: 2ch; text-align: right; color: var(--text-body); font-variant-numeric: tabular-nums; }
 
 /* ---- Color picker popover ----
    Deliberately NOT themed — kept on a fixed light surface in every theme so

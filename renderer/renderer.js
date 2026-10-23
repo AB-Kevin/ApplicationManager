@@ -179,6 +179,7 @@ const state = {
   trackerStatus: "all", // "all" or one of STATUSES' keys
   trackerSort: { key: "entryDate", dir: "desc" }, // see sortTrackerRows
   summaryYear: new Date().getFullYear(),
+  summaryOpenTables: new Set(), // "<plan>|month" / "<plan>|week" keys whose numbers table is expanded under its chart
   plansModalOpen: false, // see renderPlansModal
   plansDraft: null, // working copy of state.plans while that modal is open
   plansNewName: "",
@@ -2663,16 +2664,122 @@ async function exportTracker() {
 
 // ---- Summary view ----
 // The old spreadsheet's "<Plan> Summary" sheets: per plan in scope, the
-// running totals and the monthly/weekly tables from buildPlanSummary. Each
-// table carries a single-series bar of its "New applications" column —
-// the table itself holds the exact numbers, the bar is for the shape.
+// running totals and a line chart each of the monthly and weekly numbers
+// from buildPlanSummary. The chart is for the shape; the exact numbers are
+// in its hover readout, each period's aria-label, and a collapsible table
+// under it.
+
+// The chart's lines, bottom to top. New applications is the other two
+// summed, so it's the neutral-ink line underneath and the status lines draw
+// over it wherever they coincide (Complete == New whenever nothing's
+// pending). Colors are styles.css's --series-* (see .bm-series--*).
+const SUMMARY_SERIES = [
+  { key: "newApps", label: "New applications", cls: "new" },
+  { key: "complete", label: "Complete", cls: "complete" },
+  { key: "pending", label: "Pending card", cls: "pending" },
+];
+// Plot height in px. Only the width is fluid (x is laid out in %), so every
+// y position -- and the end-label collision check -- can be done in px.
+const SUMMARY_CHART_HEIGHT = 180;
+const SUMMARY_END_LABEL_GAP = 14; // px between two end-of-line value labels before the lower-priority one is dropped
+
+// Chart id -> { rows, n, top } for the hover layer (wireSummaryCharts), rebuilt every render.
+let summaryCharts = new Map();
+
+// The y-axis: a clean top and a 1/2/5 step giving about four gridlines.
+// Small counts get 0..4 by ones rather than a squashed 0..1.
+function summaryAxis(max) {
+  if (max <= 4) return { step: 1, top: 4 };
+  const raw = max / 4;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw);
+  return { step, top: Math.ceil(max / step) * step };
+}
+
+function summaryRowText(r) {
+  return `${r.label}: ${r.newApps} new (${r.complete} complete, ${r.pending} pending card)`;
+}
+
+// One line chart. `slots` is every period on the x-axis with its short tick
+// label; only the first `plotted` get lines and hover targets (the rest of
+// the current year hasn't happened yet). `labelEvery` thins the tick labels,
+// always keeping the last plotted one.
+function renderSummaryChartHtml(id, rows, shortLabels, plotted, highlightKey, labelEvery = 1) {
+  const n = rows.length;
+  const shown = rows.slice(0, plotted);
+  const { step, top } = summaryAxis(Math.max(0, ...shown.map((r) => r.newApps)));
+  summaryCharts.set(id, { rows: shown, n, top });
+  const xPct = (i) => ((i + 0.5) / n) * 100;
+  const yPx = (v) => SUMMARY_CHART_HEIGHT * (1 - v / top);
+  const ticks = [];
+  for (let v = 0; v <= top; v += step) ticks.push(v);
+
+  // End-of-line value labels, highest priority first; one that would sit on
+  // top of an already-placed label is dropped (its dot stays -- the legend
+  // and hover readout still carry it).
+  const last = shown[shown.length - 1];
+  const placed = [];
+  if (last) {
+    SUMMARY_SERIES.forEach((s) => {
+      const y = yPx(last[s.key]);
+      if (placed.every((p) => Math.abs(p.y - y) >= SUMMARY_END_LABEL_GAP)) placed.push({ s, y });
+    });
+  }
+  const anyApps = shown.some((r) => r.newApps > 0);
+
+  return `
+    <figure class="bm-chart">
+      <div class="bm-chart-legend">
+        ${SUMMARY_SERIES.map((s) => `<span class="bm-chart-legend-item"><span class="bm-chart-key bm-series--${s.cls}"></span>${s.label}</span>`).join("")}
+      </div>
+      <div class="bm-chart-plot" data-chart="${id}" style="height:${SUMMARY_CHART_HEIGHT}px">
+        ${ticks
+          .map(
+            (v) => `
+          <div class="bm-chart-grid" style="top:${yPx(v)}px"></div>
+          <div class="bm-chart-ytick" style="top:${yPx(v)}px">${v}</div>`
+          )
+          .join("")}
+        <svg class="bm-chart-lines" viewBox="0 0 100 ${SUMMARY_CHART_HEIGHT}" preserveAspectRatio="none" aria-hidden="true">
+          ${SUMMARY_SERIES.map(
+            (s) =>
+              `<polyline class="bm-chart-line bm-series--${s.cls}" vector-effect="non-scaling-stroke" points="${shown.map((r, i) => `${xPct(i).toFixed(2)},${yPx(r[s.key]).toFixed(1)}`).join(" ")}" />`
+          ).join("")}
+        </svg>
+        ${
+          last
+            ? SUMMARY_SERIES.map((s) => `<span class="bm-chart-dot bm-series--${s.cls}" style="left:${xPct(shown.length - 1)}%;top:${yPx(last[s.key])}px"></span>`).join("") +
+              placed.map((p) => `<span class="bm-chart-end-label" style="left:${xPct(shown.length - 1)}%;top:${p.y}px">${last[p.s.key]}</span>`).join("")
+            : ""
+        }
+        ${anyApps ? "" : `<div class="bm-chart-empty">No applications entered in this period</div>`}
+        <div class="bm-chart-crosshair bm-chart-hover"></div>
+        ${SUMMARY_SERIES.map((s) => `<span class="bm-chart-dot bm-chart-hover bm-series--${s.cls}" data-series="${s.key}"></span>`).join("")}
+        <div class="bm-chart-tip bm-chart-hover" role="presentation"></div>
+        ${shown
+          .map(
+            (r, i) =>
+              `<div class="bm-chart-hit" tabindex="0" data-i="${i}" style="left:${(i / n) * 100}%;width:${100 / n}%" aria-label="${escapeAttr(summaryRowText(r))}"></div>`
+          )
+          .join("")}
+      </div>
+      <div class="bm-chart-x" aria-hidden="true">
+        ${rows
+          .map((r, i) =>
+            (plotted - 1 - i) % labelEvery === 0 || i >= plotted
+              ? `<span class="bm-chart-xtick${r.key === highlightKey ? " is-current" : ""}" style="left:${xPct(i)}%">${escapeHtml(shortLabels[i])}</span>`
+              : ""
+          )
+          .join("")}
+      </div>
+    </figure>`;
+}
 
 function renderSummaryTableHtml(firstHeader, rows, totals, highlightKey) {
-  const max = Math.max(1, ...rows.map((r) => r.newApps));
   return `
     <table class="bm-summary-table">
       <thead><tr>
-        <th>${firstHeader}</th><th class="bm-num">Complete</th><th class="bm-num">Pending card</th><th class="bm-num">New applications</th><th class="bm-summary-bar-col" aria-hidden="true"></th>
+        <th>${firstHeader}</th><th class="bm-num">Complete</th><th class="bm-num">Pending card</th><th class="bm-num">New applications</th>
       </tr></thead>
       <tbody>
         ${rows
@@ -2683,24 +2790,33 @@ function renderSummaryTableHtml(firstHeader, rows, totals, highlightKey) {
             <td class="bm-num">${r.complete}</td>
             <td class="bm-num">${r.pending}</td>
             <td class="bm-num bm-num-strong">${r.newApps}</td>
-            <td class="bm-summary-bar-col">${
-              r.newApps
-                ? `<div class="bm-summary-bar" style="width:${((r.newApps / max) * 100).toFixed(1)}%" title="${escapeAttr(`${r.label}: ${r.newApps} new (${r.complete} complete, ${r.pending} pending card)`)}"></div>`
-                : ""
-            }</td>
           </tr>`
           )
           .join("")}
       </tbody>
       <tfoot><tr>
-        <td>Total</td><td class="bm-num">${totals.complete}</td><td class="bm-num">${totals.pending}</td><td class="bm-num bm-num-strong">${totals.newApps}</td><td></td>
+        <td>Total</td><td class="bm-num">${totals.complete}</td><td class="bm-num">${totals.pending}</td><td class="bm-num bm-num-strong">${totals.newApps}</td>
       </tr></tfoot>
     </table>`;
 }
 
-function renderPlanSummaryHtml(plan, year) {
+// A chart with its numbers table folded away underneath it.
+function renderSummaryPeriodHtml({ id, tableKey, title, firstHeader, rows, totals, shortLabels, plotted, highlightKey, labelEvery }) {
+  return `
+    <div class="bm-summary-period">
+      <div class="bm-section-label">${title}</div>
+      ${renderSummaryChartHtml(id, rows, shortLabels, plotted, highlightKey, labelEvery)}
+      <details class="bm-summary-details" data-table-key="${escapeAttr(tableKey)}" ${state.summaryOpenTables.has(tableKey) ? "open" : ""}>
+        <summary>Show numbers</summary>
+        ${renderSummaryTableHtml(firstHeader, rows, totals, highlightKey)}
+      </details>
+    </div>`;
+}
+
+function renderPlanSummaryHtml(plan, planIdx, year) {
   const s = buildPlanSummary(planRecords(plan), year);
   const today = todayIso();
+  const thisYear = Number(today.slice(0, 4));
   const tiles = [
     { label: "Total", value: s.totals.total },
     { label: "Awaiting entry", value: s.totals.awaiting, status: "awaiting" },
@@ -2722,16 +2838,82 @@ function renderPlanSummaryHtml(plan, year) {
           .join("")}
       </div>
       <div class="bm-summary-tables">
-        <div>
-          <div class="bm-section-label">Monthly · ${year}</div>
-          ${renderSummaryTableHtml("Month", s.months, s.monthTotals, today.slice(0, 7))}
-        </div>
-        <div>
-          <div class="bm-section-label">Weekly · last ${s.weeks.length} weeks</div>
-          ${renderSummaryTableHtml("Week of", s.weeks, s.weekTotals, weekStartIso(today))}
-        </div>
+        ${renderSummaryPeriodHtml({
+          id: `${planIdx}-month`,
+          tableKey: `${plan}|month`,
+          title: `Monthly · ${year}`,
+          firstHeader: "Month",
+          rows: s.months,
+          totals: s.monthTotals,
+          shortLabels: MONTH_NAMES,
+          plotted: year === thisYear ? Number(today.slice(5, 7)) : 12,
+          highlightKey: today.slice(0, 7),
+        })}
+        ${renderSummaryPeriodHtml({
+          id: `${planIdx}-week`,
+          tableKey: `${plan}|week`,
+          title: `Weekly · last ${s.weeks.length} weeks`,
+          firstHeader: "Week of",
+          rows: s.weeks,
+          totals: s.weekTotals,
+          shortLabels: s.weeks.map((w) => isoToLocalDate(w.key).toLocaleDateString("en-US", { month: "short", day: "numeric" })),
+          plotted: s.weeks.length,
+          highlightKey: weekStartIso(today),
+          labelEvery: 2,
+        })}
       </div>
     </section>`;
+}
+
+// The hover layer: a crosshair that snaps to the period under the pointer
+// (or the focused period, from the keyboard), a dot on every line there,
+// and one readout listing all three values.
+function wireSummaryCharts(main) {
+  main.querySelectorAll(".bm-chart-plot").forEach((plot) => {
+    const chart = summaryCharts.get(plot.dataset.chart);
+    if (!chart) return;
+    const { n } = chart;
+    const crosshair = plot.querySelector(".bm-chart-crosshair");
+    const tip = plot.querySelector(".bm-chart-tip");
+    const show = (i) => {
+      const r = chart.rows[i];
+      const x = `${((i + 0.5) / n) * 100}%`;
+      crosshair.style.left = x;
+      plot.querySelectorAll(".bm-chart-dot.bm-chart-hover").forEach((dot) => {
+        dot.style.left = x;
+        dot.style.top = `${SUMMARY_CHART_HEIGHT * (1 - r[dot.dataset.series] / chart.top)}px`;
+      });
+      tip.replaceChildren();
+      const head = document.createElement("div");
+      head.className = "bm-chart-tip-title";
+      head.textContent = r.label;
+      tip.appendChild(head);
+      SUMMARY_SERIES.forEach((s) => {
+        const row = document.createElement("div");
+        row.className = "bm-chart-tip-row";
+        const key = document.createElement("span");
+        key.className = `bm-chart-key bm-series--${s.cls}`;
+        const value = document.createElement("strong");
+        value.textContent = r[s.key];
+        const name = document.createElement("span");
+        name.textContent = s.label;
+        row.append(key, value, name);
+        tip.appendChild(row);
+      });
+      // Keep the readout on the side of the crosshair with more room.
+      tip.style.left = x;
+      tip.classList.toggle("is-flipped", (i + 0.5) / n > 0.5);
+      plot.classList.add("is-hover");
+    };
+    const hide = () => plot.classList.remove("is-hover");
+    plot.querySelectorAll(".bm-chart-hit").forEach((hit) => {
+      const i = Number(hit.dataset.i);
+      hit.addEventListener("pointerenter", () => show(i));
+      hit.addEventListener("focus", () => show(i));
+      hit.addEventListener("blur", hide);
+    });
+    plot.addEventListener("pointerleave", hide);
+  });
 }
 
 function renderSummaryMain() {
@@ -2739,6 +2921,7 @@ function renderSummaryMain() {
   const years = summaryYears(plans.flatMap(planRecords));
   if (!years.includes(state.summaryYear)) years.push(state.summaryYear);
   years.sort((a, b) => b - a);
+  summaryCharts = new Map();
   const main = el(`
     <main class="bm-main">
       ${renderMainTabsHtml()}
@@ -2760,7 +2943,7 @@ function renderSummaryMain() {
                 <div class="bm-empty-title">No plan selected</div>
                 <div class="bm-empty-sub">Applications with no plan aren't part of any plan's summary. Choose a plan, or All plans, in the sidebar.</div>
               </div>`
-            : plans.map((p) => renderPlanSummaryHtml(p, state.summaryYear)).join("")
+            : plans.map((p, i) => renderPlanSummaryHtml(p, i, state.summaryYear)).join("")
         }
       </div>
     </main>
@@ -2771,6 +2954,13 @@ function renderSummaryMain() {
     render();
   });
   main.querySelector("#summary-export").addEventListener("click", exportTracker);
+  wireSummaryCharts(main);
+  main.querySelectorAll(".bm-summary-details").forEach((d) =>
+    d.addEventListener("toggle", () => {
+      if (d.open) state.summaryOpenTables.add(d.dataset.tableKey);
+      else state.summaryOpenTables.delete(d.dataset.tableKey);
+    })
+  );
   return main;
 }
 
