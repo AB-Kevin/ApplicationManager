@@ -28,8 +28,8 @@
       "target": "nsis"
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "perMachine": false,
       "artifactName": "ApplicationManager-Setup-${version}.${ext}"
     },
     "publish": {
