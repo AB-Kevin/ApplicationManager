@@ -893,9 +893,7 @@ function unhideFile(file) {
 }
 
 function writeTagsFile(file, tags) {
-  unhideFile(file);
-  fs.writeFileSync(file, JSON.stringify({ tags }, null, 2), "utf8");
-  hideFile(file);
+  writeJsonRetrying(file, { tags }, { hidden: true });
 }
 
 // Where predefined tags were stored by a previous version of the app: one file
