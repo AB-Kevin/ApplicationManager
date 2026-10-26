@@ -1120,7 +1120,14 @@ function isEditableTarget(elm) {
 
 async function savePredefinedTags(tags) {
   state.predefinedTags = tags;
-  if (state.folder) await window.api.saveTagConfig(state.folder, tags);
+  if (!state.folder) return;
+  try {
+    await window.api.saveTagConfig(state.folder, tags);
+  } catch (e) {
+    const msg = String((e && e.message) || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
+    alert(`Couldn't save the tag list:
+${msg}`);
+  }
 }
 
 function openTagManager() {
