@@ -1,7 +1,7 @@
 # ApplicationManager — application holding space and member tracker
 Private - Anabaptist Brotherhood internal use only
 
-A Windows and Mac desktop app (built with Electron) that holds Member
+A Windows desktop app (built with Electron) that holds Member
 Applications — scanned paper ones and ones imported from the online form —
 while they wait to be entered into the membership software, and tracks each
 one through entry and member-card mailing per plan (MAAP, AMCA, and any
@@ -44,47 +44,28 @@ electron-builder downloads a small packaging tool. Double-click the generated
 installer to install ApplicationManager like any other Windows app — it'll show up in
 your Start Menu and can be uninstalled from Windows Settings normally.
 
-## 3. Build a standalone Mac app (.dmg/.zip)
-
-Mac installers must be built on a Mac (electron-builder can't cross-build them
-from Windows). On a Mac, run:
-
-```
-npm run dist:mac
-```
-
-This produces a `.dmg` and `.zip` in the `dist/` folder. The build isn't
-signed with a paid Apple Developer ID, so on first launch macOS Gatekeeper
-will warn that the app is from an unidentified developer. To open it anyway:
-
-- Right-click (or Control-click) the app → **Open** → confirm in the dialog
-  that appears, **or**
-- **System Settings → Privacy & Security** → scroll down → **Open Anyway**.
-
-This is only needed once per machine, on the very first launch.
-
-Because the build isn't signed with a paid Developer ID, in-app auto-update
-also can't silently install a new version on Mac (that part of
-electron-updater requires real signing). Mac's "Update" button still detects
-when a new version is out, but clicking it just opens the GitHub release page
-so the new `.dmg` can be downloaded and installed the normal way — the same
-Gatekeeper "Open Anyway" step applies again on that reinstall. Windows is
-unaffected and keeps installing updates in-app.
-
-## Releasing (both platforms, from either OS)
+## Releasing
 
 Releases are automated via [.github/workflows/release.yml](.github/workflows/release.yml).
-Bump `"version"` in `package.json`, commit, then push a matching tag:
+Once your changes are committed:
 
 ```
-git tag v1.2.2
-git push origin v1.2.2
+npm version patch       # or minor / major: bumps the version, commits, and tags vX.Y.Z
+git push --follow-tags  # or run `git config push.followTags true` once, then plain `git push`
 ```
 
-GitHub Actions then builds the Windows `.exe` (on a Windows runner) and the
-Mac `.dmg`/`.zip` (on a macOS runner) and publishes both to the GitHub Release
-for that tag — no local Mac needed. `electron-updater` picks the right asset
-per platform automatically, so this can be run entirely from Windows.
+GitHub Actions then builds the Windows installer and publishes it to the
+GitHub Release for that tag as `ApplicationManager-Setup-X.Y.Z.exe`, with its
+`.blockmap` and a `latest.yml` beside it. The release is created as a draft
+and published only once all three files are attached, so the in-app updater
+and AB Apps never find a latest release without `latest.yml`. The build stops
+without publishing if the tag doesn't match the version in `package.json`.
+
+- `npm version` stops without changing anything if there are uncommitted
+  changes.
+- Keep the tag as `vX.Y.Z` and leave `artifactName` in `package.json` as it
+  is: the workflow uploads the installer by that name, and `latest.yml`
+  points the updater at it.
 
 ## Notes
 
@@ -183,11 +164,10 @@ per platform automatically, so this can be run entirely from Windows.
   the whole batch as one step) from the bulk-actions bar above the grid.
 - "About" in the sidebar (below the version number) shows the app version,
   update status, a short description, credits, and a link to this repo.
-- The app icon (window/taskbar icon, and the packaged Windows/Mac
-  installer's icon) is a single `build/icon.png`. `npm start`'s
-  `BrowserWindow` points at it directly; `npm run dist`/`dist:mac` convert
-  it into the platform-specific `.ico`/`.icns` automatically since
-  `package.json`'s `build.win`/`build.mac` don't override `icon`.
+- The app icon (window/taskbar icon, and the installer's icon) is a single
+  `build/icon.png`. `npm start`'s `BrowserWindow` points at it directly;
+  `npm run dist` converts it into an `.ico` automatically since
+  `package.json`'s `build.win` doesn't override `icon`.
 - Only `.pdf`, `.jpg`, `.jpeg`, and `.png` files are shown.
 - "All files" browses the chosen folder and every subfolder recursively.
   Underneath it the sidebar always lists `Inbox` and `Entered` (plus any
