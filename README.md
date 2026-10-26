@@ -146,7 +146,11 @@ without publishing if the tag doesn't match the version in `package.json`.
   scanned ones. The connection, form choice, mapping, and import history are
   saved into another hidden per-folder file, `.api-config.json` — same
   reasoning as `.catalog-tags.json`: every computer pointed at the shared
-  folder picks up the same connection automatically. Only three things are
+  folder picks up the same connection automatically. Because anyone with the
+  folder can read that file, the key must have **Read** permission only
+  (WordPress → Forms → Settings → REST API → Add Key → Permissions: Read):
+  importing only reads entries, and a read-only key can't change anything on
+  the site. The site URL must start with `https://`. Only three things are
   mapped ("Mapping"): which online answers hold the name, the member ID,
   and the member start date — plus which plan imports are filed under.
   "Import" drops each new submission into an `Inbox` subfolder (created if

@@ -1099,8 +1099,11 @@ ipcMain.handle("save-api-config", async (event, folder, config) => {
 // alternative to full OAuth1 request signing (consumer key as username,
 // consumer secret as password) -- see docs.gravityforms.com. Basic Auth is
 // enough here since this app only ever talks to sites the org configures
-// itself, and avoids implementing OAuth1 signing for no real benefit.
+// itself, and avoids implementing OAuth1 signing for no real benefit. Basic
+// Auth sends the key and secret with every request, so only https is allowed
+// (as in SendNewsletters).
 async function gfFetch(siteUrl, consumerKey, consumerSecret, endpoint) {
+  if (!/^https:\/\//i.test(siteUrl || "")) throw new Error("The site URL has to start with https://.");
   const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString("base64");
   const base = siteUrl.replace(/\/+$/, "");
   const res = await fetch(`${base}/wp-json/gf/v2/${endpoint}`, {

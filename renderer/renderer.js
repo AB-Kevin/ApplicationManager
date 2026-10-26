@@ -4333,7 +4333,7 @@ function renderApiSetupModal() {
       <div class="bm-modal">
         <div class="bm-modal-header">
           <div class="bm-modal-title">Connect to the Gravity Forms API</div>
-          <div class="bm-modal-sub">Saved into this folder (a hidden .api-config.json), so every computer pointed at it picks up the same connection automatically -- not just this device.</div>
+          <div class="bm-modal-sub">Saved into this folder (a hidden .api-config.json), so every computer pointed at it picks up the same connection automatically -- not just this device. Anyone with the folder can read the key, so use one with Read permission only.</div>
         </div>
         <div class="bm-modal-body">
           ${
