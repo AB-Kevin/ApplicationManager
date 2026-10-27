@@ -201,6 +201,7 @@ const state = {
   commenterName: "", // per-device name signed onto new comments — see main.js's settings.json
   commenterModalOpen: false, // shown unskippably on first launch (no commenterName yet), or on demand from the Options dialog
   commenterNameDraft: "", // working copy of commenterName while the name modal is open
+  abAppsFolder: null, // { reason, target, canMove } -- see followAbAppsFolder
   abAppsName: "", // name of whoever's signed in to AB Apps, if anyone — overrides commenterName when set, see commentSignerName()
   settingsModalOpen: false, // the rail's "Options" dialog — a home for per-device settings (currently comment name + theme)
   theme: "system", // "system" | "light" | "dark" — per-device, see main.js's settings.json and resolveTheme()
@@ -613,9 +614,37 @@ setInterval(() => {
 }, AUTO_REFRESH_INTERVAL_MS);
 
 window.addEventListener("focus", () => {
+  followAbAppsFolder();
   if (!backgroundRefreshAllowed() || Date.now() - lastRefreshAt < FOCUS_REFRESH_MIN_GAP_MS) return;
   refreshFiles(true);
 });
+
+// Where the applications belong while someone is signed in to AB Apps (see
+// main.js's abAppsFolderChoice): { reason, target, canMove }. Re-checked on
+// focus, so a move a manager made on another computer, or a sign-in to AB
+// Apps, opens the AB Apps folder here too.
+async function followAbAppsFolder() {
+  const next = await window.api.getAbAppsFolder();
+  const changed = JSON.stringify(next) !== JSON.stringify(state.abAppsFolder);
+  state.abAppsFolder = next;
+  if (next.reason === "ab-apps" && state.folder && state.folder.toLowerCase() !== next.target.toLowerCase()) {
+    await openFolder(await window.api.getLastFolder());
+  } else if (changed) {
+    render();
+  }
+}
+
+async function moveToAbAppsFolder() {
+  try {
+    const result = await window.api.moveToAbAppsFolder();
+    if (!result) return;
+    state.abAppsFolder = await window.api.getAbAppsFolder();
+    await openFolder(result.folder);
+  } catch (e) {
+    alert(`Couldn't move the applications:
+${e.message || e}`);
+  }
+}
 
 async function chooseFolder() {
   const folder = await window.api.selectFolder();
@@ -1993,7 +2022,11 @@ function renderRail() {
     <aside class="bm-rail">
       <div class="bm-rail-scroll">
         <div class="bm-choose-folder-wrap">
-          <button class="bm-btn bm-btn-secondary bm-btn-block" id="choose-folder">${ICONS.upload} Choose folder</button>
+          ${
+            state.abAppsFolder?.reason === "ab-apps"
+              ? ""
+              : `<button class="bm-btn bm-btn-secondary bm-btn-block" id="choose-folder">${ICONS.upload} Choose folder</button>`
+          }
           ${
             state.folder
               ? `<div class="bm-rail-path-row">
@@ -2001,6 +2034,13 @@ function renderRail() {
                    <button class="bm-refresh-btn ${state.refreshing ? "spinning" : ""}" id="refresh-folder-btn" title="Refresh — rescan this folder for changes" ${state.refreshing ? "disabled" : ""}>${ICONS.refresh}</button>
                  </div>`
               : `<div class="bm-rail-hint">Pick a folder to browse its PDFs, JPGs, and PNGs.</div>`
+          }
+          ${
+            state.abAppsFolder?.reason === "not-moved" && state.folder
+              ? `<div class="bm-rail-hint">The applications belong in the AB Apps folder now, where every computer opens them by itself.
+                   ${state.abAppsFolder.canMove ? "" : "A manager can move them."}</div>
+                 ${state.abAppsFolder.canMove ? `<button class="bm-btn bm-btn-primary bm-btn-sm bm-btn-block" id="move-to-ab-apps-btn">Move to the AB Apps folder</button>` : ""}`
+              : ""
           }
         </div>
         ${
@@ -2086,7 +2126,8 @@ function renderRail() {
     </aside>
   `);
 
-  rail.querySelector("#choose-folder").addEventListener("click", chooseFolder);
+  rail.querySelector("#choose-folder")?.addEventListener("click", chooseFolder);
+  rail.querySelector("#move-to-ab-apps-btn")?.addEventListener("click", moveToAbAppsFolder);
   const refreshBtn = rail.querySelector("#refresh-folder-btn");
   if (refreshBtn) refreshBtn.addEventListener("click", refreshFiles);
   const manageBtn = rail.querySelector("#manage-tags-btn");
@@ -4837,6 +4878,7 @@ function renderCommenterNameModal() {
   window.api.onUpdateStatus((status) => setUpdateStatus(status));
   checkForUpdates(); // not awaited — a startup check shouldn't hold up opening the last folder
 
+  state.abAppsFolder = await window.api.getAbAppsFolder();
   const lastFolder = await window.api.getLastFolder();
   if (lastFolder) {
     try {

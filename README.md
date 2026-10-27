@@ -71,6 +71,7 @@ if a test fails.
 
 ## Notes
 
+- While someone is signed in to [AB Apps](https://github.com/AB-Kevin/ab-apps), the applications live in the `ApplicationManager` subfolder of the AB Apps folder, which every computer opens by itself, and **Choose folder** goes away. Applications still in the folder someone used before stay there until a manager moves them once, with **Move to the AB Apps folder** in the rail: the files and their records are copied into the subfolder, the old folder is kept as it was, and a note left there has every other computer open the new one the next time its window gets focus.
 - Tags and comments are written into each file's native metadata, so they
   move, copy, and rename with the file automatically — even outside the app.
   Files already tagged elsewhere (Windows Explorer's "Tags" field, Adobe

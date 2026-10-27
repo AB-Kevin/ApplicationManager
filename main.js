@@ -9,6 +9,7 @@ const { autoUpdater } = require("electron-updater");
 const { DEFAULT_PLANS, makeBlankRecord, normalizeRecord, normalizeDateToIso, todayIso } = require("./renderer/application-form.js");
 const { generateApplicationPdf } = require("./application-pdf.js");
 const { readTrackerWorkbook, writeTrackerWorkbook } = require("./tracker-xlsx.js");
+const { appFolder, samePath, chooseFolder, moveToAbApps } = require("ab-common/appfolder");
 
 const ACCEPTED_EXT = [".pdf", ".jpg", ".jpeg", ".png"];
 
@@ -286,20 +287,103 @@ ipcMain.handle("select-folder", async () => {
 // next launch. Lives in the app's own userData directory, not the catalog folder.
 const LAST_FOLDER_FILE = path.join(app.getPath("userData"), "last-folder.json");
 
-ipcMain.handle("get-last-folder", async () => {
+function readLastFolder() {
   try {
-    const { folder } = JSON.parse(fs.readFileSync(LAST_FOLDER_FILE, "utf8"));
-    // Confirm it's still there — a removable drive or deleted folder should fall
-    // back to the normal "no folder open" state rather than error on launch.
+    return JSON.parse(fs.readFileSync(LAST_FOLDER_FILE, "utf8")).folder || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastFolder(folder) {
+  fs.mkdirSync(path.dirname(LAST_FOLDER_FILE), { recursive: true });
+  fs.writeFileSync(LAST_FOLDER_FILE, JSON.stringify({ folder }), "utf8");
+}
+
+// --- The AB Apps folder ------------------------------------------------------
+// While someone is signed in to AB Apps, the applications live in the
+// ApplicationManager subfolder of the AB Apps folder (ab-common's
+// appfolder.js), and every computer opens it by itself. Applications still in
+// the folder someone used before stay there until a manager moves them; every
+// other computer follows the note the move leaves. Without AB Apps, the
+// folder is chosen as before.
+const AB_APPS_FOLDER_NAME = "ApplicationManager";
+
+// Who is signed in to AB Apps, as far as folders go: { dataDir, class, name }, or null.
+function readAbAppsSignIn() {
+  try {
+    const identity = JSON.parse(fs.readFileSync(AB_APPS_IDENTITY_FILE, "utf8"));
+    if (identity?.version !== 1 || typeof identity.dataDir !== "string" || !identity.dataDir) return null;
+    return { dataDir: identity.dataDir, class: identity.class, name: String(identity.name || "").trim() };
+  } catch {
+    return null;
+  }
+}
+
+const hasApplications = (dir) => {
+  try {
+    return fs.readdirSync(dir).some((name) => name.toLowerCase() !== "desktop.ini");
+  } catch {
+    return false;
+  }
+};
+
+// { dir, reason, target, canMove }: reason is "own" (no AB Apps), "ab-apps",
+// or "not-moved" (still in the last folder, waiting for a manager to move it).
+function abAppsFolderChoice() {
+  const who = readAbAppsSignIn();
+  const target = who && fs.existsSync(who.dataDir) ? appFolder(who, AB_APPS_FOLDER_NAME) : null;
+  return { ...chooseFolder({ own: readLastFolder(), target, hasData: hasApplications }), target, canMove: who?.class === "manager" };
+}
+
+ipcMain.handle("get-last-folder", async () => {
+  const choice = abAppsFolderChoice();
+  if (choice.reason === "ab-apps") {
+    fs.mkdirSync(choice.dir, { recursive: true });
+    if (!samePath(readLastFolder(), choice.dir)) writeLastFolder(choice.dir);
+    return choice.dir;
+  }
+  const folder = readLastFolder();
+  // Confirm it's still there — a removable drive or deleted folder should fall
+  // back to the normal "no folder open" state rather than error on launch.
+  try {
     if (folder && fs.statSync(folder).isDirectory()) return folder;
   } catch {}
   return null;
 });
 
 ipcMain.handle("set-last-folder", async (event, folder) => {
-  fs.mkdirSync(path.dirname(LAST_FOLDER_FILE), { recursive: true });
-  fs.writeFileSync(LAST_FOLDER_FILE, JSON.stringify({ folder }), "utf8");
+  writeLastFolder(folder);
   return true;
+});
+
+// Where the applications belong, for the rail (and, on focus, to follow a move).
+ipcMain.handle("get-ab-apps-folder", async () => {
+  const { reason, target, canMove } = abAppsFolderChoice();
+  return { reason, target, canMove };
+});
+
+// A manager moves the applications -- files, their records and everything
+// else in the folder -- into the AB Apps folder, once. The folder is left as
+// it was, as a backup.
+ipcMain.handle("move-to-ab-apps-folder", async () => {
+  const choice = abAppsFolderChoice();
+  if (choice.reason !== "not-moved") throw new Error("The applications are already in the AB Apps folder.");
+  if (!choice.canMove) throw new Error("Only a manager can move the applications.");
+  const from = readLastFolder();
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: "question",
+    buttons: ["Move", "Cancel"],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    message: "Move the applications to the AB Apps folder?",
+    detail: `Everything in ${from} -- the application files, their records, plans and tags -- is copied to ${choice.target}, and every computer opens it from there. The current folder is left as it was, as a backup you can delete later.`,
+  });
+  if (response !== 0) return null;
+  const files = moveToAbApps({ from, to: choice.target, folder: AB_APPS_FOLDER_NAME, by: readAbAppsSignIn()?.name });
+  writeLastFolder(choice.target);
+  return { files, folder: choice.target };
 });
 
 // Small per-device settings that aren't tied to any one catalog folder — the

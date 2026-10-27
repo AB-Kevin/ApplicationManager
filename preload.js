@@ -40,6 +40,8 @@ contextBridge.exposeInMainWorld("api", {
   applyMappingToImported: (folder) => ipcRenderer.invoke("apply-mapping-to-imported", folder),
   getLastFolder: () => ipcRenderer.invoke("get-last-folder"),
   setLastFolder: (folder) => ipcRenderer.invoke("set-last-folder", folder),
+  getAbAppsFolder: () => ipcRenderer.invoke("get-ab-apps-folder"),
+  moveToAbAppsFolder: () => ipcRenderer.invoke("move-to-ab-apps-folder"),
   getCommenterName: () => ipcRenderer.invoke("get-commenter-name"),
   setCommenterName: (name) => ipcRenderer.invoke("set-commenter-name", name),
   getAbAppsName: () => ipcRenderer.invoke("get-ab-apps-name"),
