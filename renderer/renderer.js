@@ -167,6 +167,7 @@ const state = {
   recordingShortcutIdx: null, // index into tagModalDraft currently listening for a keypress
   colorPicker: null, // { idx, h, s, v } — the tag-row color picker popover, or null if closed
   apiConfig: null, // parsed .api-config.json for the open folder, or null if never connected — see main.js's readApiConfig/getApiConfig
+  abAppsWebsite: null, // { siteUrl } while AB Apps sets the website and key every folder's connection uses, or null
   plans: [], // plan names for the open folder, from its .plans.json — see main.js's readPlans
   records: [], // record-only tracker rows (no file behind them), from the folder's .records — see main.js's list-records
   activePlan: null, // plan filter shared by every view: null = all plans, NO_PLAN = only rows with no plan yet, else a plan name
@@ -4185,7 +4186,8 @@ function renderSettingsModal() {
 // folder sees the same connection -- that's the whole point of storing it
 // there instead of in settings.json alongside commenterName/theme/etc.
 
-function openApiSetupModal() {
+async function openApiSetupModal() {
+  state.abAppsWebsite = await window.api.getAbAppsWebsite();
   if (state.tagModalOpen) closeTagManager(false);
   if (state.aboutOpen) closeAbout();
   if (state.settingsModalOpen) closeSettingsModal();
@@ -4210,7 +4212,7 @@ function closeApiSetupModal() {
 
 async function testApiConnection() {
   const { siteUrl, consumerKey, consumerSecret } = state.apiSetupDraft;
-  if (!siteUrl.trim() || !consumerKey.trim() || !consumerSecret.trim()) {
+  if (!state.abAppsWebsite && (!siteUrl.trim() || !consumerKey.trim() || !consumerSecret.trim())) {
     state.apiSetupError = "Site URL, consumer key, and consumer secret are all required.";
     render();
     return;
@@ -4264,11 +4266,18 @@ function renderApiSetupModal() {
       <div class="bm-modal">
         <div class="bm-modal-header">
           <div class="bm-modal-title">Connect to the Gravity Forms API</div>
-          <div class="bm-modal-sub">Saved into this folder (a hidden .api-config.json), so every computer pointed at it picks up the same connection automatically -- not just this device. Anyone with the folder can read the key, so use one with Read permission only.</div>
+          <div class="bm-modal-sub">${
+            state.abAppsWebsite
+              ? `Uses the website and key a manager set in AB Apps, <strong>${escapeHtml(state.abAppsWebsite.siteUrl)}</strong>. Which form, and how its fields map, are saved into this folder (a hidden .api-config.json) for every computer pointed at it.`
+              : "Saved into this folder (a hidden .api-config.json), so every computer pointed at it picks up the same connection automatically -- not just this device. Anyone with the folder can read the key, so use one with Read permission only."
+          }</div>
         </div>
         <div class="bm-modal-body">
           ${
-            state.apiSetupStep === "credentials"
+            state.apiSetupStep === "credentials" && state.abAppsWebsite
+              ? `<p class="bm-modal-sub">A manager changes the website and key on AB Apps' Mail and website page. Test & Continue to choose the form.</p>
+            ${state.apiSetupError ? `<div class="bm-appform-badge">${escapeHtml(state.apiSetupError)}</div>` : ""}`
+              : state.apiSetupStep === "credentials"
               ? `
             <div class="bm-field">
               <label class="bm-field-label" for="api-site-url">Site URL</label>
@@ -4310,7 +4319,9 @@ function renderApiSetupModal() {
     if (e.target === overlay) closeApiSetupModal();
   });
   overlay.querySelector("#api-setup-cancel").addEventListener("click", closeApiSetupModal);
-  if (state.apiSetupStep === "credentials") {
+  if (state.apiSetupStep === "credentials" && state.abAppsWebsite) {
+    overlay.querySelector("#api-setup-test").addEventListener("click", testApiConnection);
+  } else if (state.apiSetupStep === "credentials") {
     overlay.querySelector("#api-site-url").addEventListener("input", (e) => {
       state.apiSetupDraft.siteUrl = e.target.value;
     });

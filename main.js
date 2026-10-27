@@ -355,6 +355,39 @@ function readAbAppsName() {
   }
 }
 
+// The website a manager set on AB Apps' Mail and website page, from the AB
+// Apps folder the identity file names: { siteUrl, consumerKey,
+// consumerSecret }, a read-only Gravity Forms key. While there is one, every
+// folder's connection uses it instead of the address and key in its own
+// .api-config.json; the form, mapping and import history stay per folder.
+// Null when nobody is signed in, none is set, or it can't be read.
+function readAbAppsWebsite() {
+  try {
+    const identity = JSON.parse(fs.readFileSync(AB_APPS_IDENTITY_FILE, "utf8"));
+    if (identity?.version !== 1 || typeof identity.dataDir !== "string" || !identity.dataDir) return null;
+    const services = JSON.parse(fs.readFileSync(path.join(identity.dataDir, "shared", "services.json"), "utf8").replace(/^﻿/, ""));
+    const w = services?.version === 1 ? services.website : null;
+    const text = (value) => (typeof value === "string" ? value.trim() : "");
+    const siteUrl = text(w?.siteUrl).replace(/\/+$/, "");
+    if (!/^https:\/\//i.test(siteUrl) || !text(w.consumerKey) || !text(w.consumerSecret)) return null;
+    return { siteUrl, consumerKey: text(w.consumerKey), consumerSecret: text(w.consumerSecret) };
+  } catch {
+    return null;
+  }
+}
+
+// A folder's connection as it's used: its own, with AB Apps' website and key
+// in place of its own when there's one. Never written back to the folder.
+function apiConnection(config) {
+  const website = readAbAppsWebsite();
+  return config && website ? { ...config, ...website } : config;
+}
+
+ipcMain.handle("get-ab-apps-website", () => {
+  const website = readAbAppsWebsite();
+  return website && { siteUrl: website.siteUrl };
+});
+
 // Last name handed to the renderer, so sign-in/sign-out/rename in AB Apps is
 // only pushed ("ab-apps-name") when it actually changed. Re-checked on window
 // focus and by a cheap 2s fs.watchFile poll (see app.whenReady), so none of
@@ -1002,7 +1035,10 @@ async function gfFetch(siteUrl, consumerKey, consumerSecret, endpoint) {
   return res.json();
 }
 
+// While AB Apps sets the website, its address and key are used rather than the ones passed.
 ipcMain.handle("test-gf-connection", async (event, siteUrl, consumerKey, consumerSecret) => {
+  const website = readAbAppsWebsite();
+  if (website) ({ siteUrl, consumerKey, consumerSecret } = website);
   const forms = await gfFetch(siteUrl, consumerKey, consumerSecret, "forms");
   // Confirmed from docs: GET /forms returns an array of form summaries. Some
   // GF sites/versions are known to return an id-keyed object instead for
@@ -1040,6 +1076,8 @@ function flattenGfFields(form) {
 }
 
 ipcMain.handle("get-gf-form-fields", async (event, siteUrl, consumerKey, consumerSecret, formId) => {
+  const website = readAbAppsWebsite();
+  if (website) ({ siteUrl, consumerKey, consumerSecret } = website);
   const form = await gfFetch(siteUrl, consumerKey, consumerSecret, `forms/${formId}`);
   return flattenGfFields(form);
 });
@@ -1129,7 +1167,7 @@ function importedEntryPaths(folder, config) {
 ipcMain.handle("list-gf-entries", async (event, folder) => {
   const config = readApiConfig(folder);
   if (!config || !config.formId) throw new Error("No API connection configured for this folder yet.");
-  const { entries, totalCount } = await fetchAllGfEntries(config);
+  const { entries, totalCount } = await fetchAllGfEntries(apiConnection(config));
   // An entry whose imported file has since been deleted is offered again --
   // that's how an application gets re-imported (e.g. to regenerate its PDF).
   const imported = importedEntryPaths(folder, config);
@@ -1144,14 +1182,15 @@ ipcMain.handle("list-gf-entries", async (event, folder) => {
 ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
   const config = readApiConfig(folder);
   if (!config || !config.formId) throw new Error("No API connection configured for this folder yet.");
-  const { entries } = await fetchAllGfEntries(config);
+  const connection = apiConnection(config);
+  const { entries } = await fetchAllGfEntries(connection);
   const byId = new Map(entries.map((e) => [String(e.id), e]));
   // The PDF lists every answer under the form's own labels and sections.
   // Best-effort: if the form can't be fetched, the PDF falls back to
   // numbered fields and the import still goes ahead.
   let fields = [];
   try {
-    fields = (await gfFetch(config.siteUrl, config.consumerKey, config.consumerSecret, `forms/${config.formId}`)).fields || [];
+    fields = (await gfFetch(connection.siteUrl, connection.consumerKey, connection.consumerSecret, `forms/${config.formId}`)).fields || [];
   } catch {}
   const mapping = recordMapping(config);
   const inboxDir = path.join(folder, INBOX_DIRNAME);
@@ -1203,7 +1242,7 @@ ipcMain.handle("apply-mapping-to-imported", async (event, folder) => {
   if (!config || !config.formId) return { updated: 0 };
   const importedEntries = importedEntryPaths(folder, config);
   if (Object.keys(importedEntries).length === 0) return { updated: 0 };
-  const { entries } = await fetchAllGfEntries(config);
+  const { entries } = await fetchAllGfEntries(apiConnection(config));
   const byId = new Map(entries.map((e) => [String(e.id), e]));
   const mapping = recordMapping(config);
   let updated = 0;

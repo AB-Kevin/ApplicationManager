@@ -150,7 +150,10 @@ without publishing if the tag doesn't match the version in `package.json`.
   folder can read that file, the key must have **Read** permission only
   (WordPress → Forms → Settings → REST API → Add Key → Permissions: Read):
   importing only reads entries, and a read-only key can't change anything on
-  the site. The site URL must start with `https://`. Only three things are
+  the site. The site URL must start with `https://`. While someone is
+  signed in to AB Apps and a manager has set the website on its "Mail and
+  website" page, every folder uses that address and read-only key instead of
+  its own, and "Connect" only chooses the form. Only three things are
   mapped ("Mapping"): which online answers hold the name, the member ID,
   and the member start date — plus which plan imports are filed under.
   "Import" drops each new submission into an `Inbox` subfolder (created if

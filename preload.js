@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld("api", {
   saveTagConfig: (folder, tags) => ipcRenderer.invoke("save-tag-config", folder, tags),
   patchAppForm: (folder, filename, patch, editor) => ipcRenderer.invoke("patch-app-form", folder, filename, patch, editor),
   getApiConfig: (folder) => ipcRenderer.invoke("get-api-config", folder),
+  getAbAppsWebsite: () => ipcRenderer.invoke("get-ab-apps-website"),
   saveApiConfig: (folder, config) => ipcRenderer.invoke("save-api-config", folder, config),
   getPlans: (folder) => ipcRenderer.invoke("get-plans", folder),
   savePlans: (folder, plans) => ipcRenderer.invoke("save-plans", folder, plans),
