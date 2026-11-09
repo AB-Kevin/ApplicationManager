@@ -187,6 +187,10 @@ if a test fails.
 - Nothing stays loose at the top of the workspace: a file dragged into the
   app goes to `Inbox`, and one dropped at the root from outside (a scanner,
   Explorer, another computer's sync) is moved on the next scan — to `Inbox`,
-  or straight to `Entered` if it already has an entry date. This only
+  or straight to `Entered` if it already has an entry date. A file in
+  `Inbox` (not a subfolder of it) that has an entry date is moved on to
+  `Entered` the same way — so one that was busy (OneDrive syncing it, say)
+  when its date was set catches up, though dragging an entered file back
+  into `Inbox` by hand won't keep it there. This only
   happens in a folder that already has an `Inbox` or `Entered`, so opening
   some other folder by mistake never rearranges it.

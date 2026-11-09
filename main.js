@@ -1005,7 +1005,27 @@ function mergeRecordPatch(current, patch, editor) {
 const INBOX_DIRNAME = "Inbox";
 const ENTERED_DIRNAME = "Entered";
 
-function fileByEntryStatus(folder, relPath, rec) {
+// OneDrive (or a PDF viewer) can hold a file for a moment -- same transient
+// lock writeJsonRetrying waits out. Without this, an entry date saved while
+// the file was busy left it sitting in Inbox.
+const MOVE_RETRIES = 4;
+const MOVE_RETRY_DELAY_MS = 500;
+
+function renameRetrying(src, dest, retries) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(src, dest);
+      return;
+    } catch (e) {
+      if (attempt >= retries || !["EBUSY", "EPERM", "EACCES"].includes(e.code)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, MOVE_RETRY_DELAY_MS);
+    }
+  }
+}
+
+// `retries` is for a save the person is waiting on; the folder scan passes 0
+// and just tries again on its next pass.
+function fileByEntryStatus(folder, relPath, rec, { retries = MOVE_RETRIES } = {}) {
   const inEntered = relPath.startsWith(`${ENTERED_DIRNAME}/`);
   const atRoot = !relPath.includes("/");
   let destDir = null;
@@ -1020,7 +1040,7 @@ function fileByEntryStatus(folder, relPath, rec) {
   const destFull = path.join(folder, destDir, name);
   try {
     fs.mkdirSync(path.dirname(destFull), { recursive: true });
-    fs.renameSync(srcFull, destFull);
+    renameRetrying(srcFull, destFull, retries);
   } catch (e) {
     return { path: relPath, moveError: `Saved, but couldn't move "${path.basename(relPath)}" to ${destDir}: ${e.message}` };
   }
@@ -1030,15 +1050,32 @@ function fileByEntryStatus(folder, relPath, rec) {
 
 // Nothing stays loose at the workspace root: a file dropped there (by a
 // scanner, from Explorer, or synced in from another computer) is filed on
-// the next scan. One still locked mid-copy just stays put until a later
-// scan. Only done in a folder that already has an Inbox or Entered, so
-// pointing "Choose folder" at the wrong place never rearranges it.
+// the next scan. A file in Inbox that already has an entry date is moved on
+// into Entered too -- that's how one whose move failed when its date was
+// set (still locked by OneDrive, say) catches up, on any computer. Files in
+// a subfolder of Inbox are left where someone put them. One still locked
+// just stays put until a later scan. Only done in a folder that already has
+// an Inbox or Entered, so pointing "Choose folder" at the wrong place never
+// rearranges it.
 function fileLooseFiles(folder) {
   const isWorkspace = [INBOX_DIRNAME, ENTERED_DIRNAME].some((d) => fs.existsSync(path.join(folder, d)));
   if (!isWorkspace) return;
-  for (const e of fs.readdirSync(folder, { withFileTypes: true })) {
-    if (e.name.startsWith(".") || !e.isFile() || !ACCEPTED_EXT.includes(path.extname(e.name).toLowerCase())) continue;
-    fileByEntryStatus(folder, e.name, normalizeRecord(readAppForm(path.join(folder, e.name))));
+  const filesIn = (dir) => {
+    try {
+      return fs
+        .readdirSync(path.join(folder, dir), { withFileTypes: true })
+        .filter((e) => !e.name.startsWith(".") && e.isFile() && ACCEPTED_EXT.includes(path.extname(e.name).toLowerCase()))
+        .map((e) => (dir ? `${dir}/${e.name}` : e.name));
+    } catch {
+      return [];
+    }
+  };
+  for (const relPath of filesIn("")) {
+    fileByEntryStatus(folder, relPath, normalizeRecord(readAppForm(path.join(folder, relPath))), { retries: 0 });
+  }
+  for (const relPath of filesIn(INBOX_DIRNAME)) {
+    const rec = normalizeRecord(readAppForm(path.join(folder, relPath)));
+    if (rec.entryDate) fileByEntryStatus(folder, relPath, rec, { retries: 0 });
   }
 }
 
