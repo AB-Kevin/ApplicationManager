@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const crypto = require("crypto");
 const { pathToFileURL } = require("url");
 const { execFileSync } = require("child_process");
@@ -8,6 +9,7 @@ const { exiftool } = require("exiftool-vendored");
 const { autoUpdater } = require("electron-updater");
 const { DEFAULT_PLANS, makeBlankRecord, normalizeRecord, normalizeDateToIso, todayIso } = require("./renderer/application-form.js");
 const { generateApplicationPdf } = require("./application-pdf.js");
+const { entriesForDailyImport, dailyImportDue } = require("./renderer/daily-import.js");
 const { readTrackerWorkbook, writeTrackerWorkbook } = require("./tracker-xlsx.js");
 const { appFolder, samePath, chooseFolder, moveToAbApps } = require("ab-common/appfolder");
 
@@ -1126,12 +1128,20 @@ ipcMain.handle("get-api-config", async (event, folder) => {
 // someone else may have imported entries since that copy was loaded -- their
 // import history is merged back in rather than dropped. Switching to a
 // different form deliberately starts the history over (see pickApiForm).
+// The daily import's state is only ever written here in main (see
+// updateDailyImport), so the file's copy always wins over the renderer's;
+// a new form keeps the computer that runs it but only takes submissions
+// from then on.
 ipcMain.handle("save-api-config", async (event, folder, config) => {
   const current = readApiConfig(folder);
-  const merged =
-    current && current.formId === config.formId
-      ? { ...config, importedEntries: { ...(current.importedEntries || {}), ...(config.importedEntries || {}) } }
-      : config;
+  const sameForm = current && current.formId === config.formId;
+  const merged = sameForm
+    ? { ...config, importedEntries: { ...(current.importedEntries || {}), ...(config.importedEntries || {}) } }
+    : { ...config };
+  delete merged.dailyImport;
+  if (current?.dailyImport) {
+    merged.dailyImport = sameForm ? current.dailyImport : { ...current.dailyImport, since: new Date().toISOString(), lastError: null };
+  }
   writeApiConfig(folder, merged);
   return merged;
 });
@@ -1297,14 +1307,38 @@ ipcMain.handle("list-gf-entries", async (event, folder) => {
   const summarized = entries
     .filter((e) => !stillImported(String(e.id)))
     .map((e) => ({ id: String(e.id), date: e.date_created || "", name: mappedRecordFields(e, mapping).name || null }));
+  // Someone has looked at what's waiting, so the other computers' "nothing
+  // checked in two days" banner can rest (see dailyImportWarning).
+  updateDailyImport(folder, { lastCheckAt: new Date().toISOString(), lastCheckOn: THIS_COMPUTER });
   return { totalFetched: totalCount, entries: summarized };
 });
 
 ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
-  const config = readApiConfig(folder);
-  if (!config || !config.formId) throw new Error("No API connection configured for this folder yet.");
-  const connection = apiConnection(config);
-  const { entries } = await fetchAllGfEntries(connection);
+  return withGfImportLock(async () => {
+    const config = readApiConfig(folder);
+    if (!config || !config.formId) throw new Error("No API connection configured for this folder yet.");
+    const connection = apiConnection(config);
+    const { entries } = await fetchAllGfEntries(connection);
+    // The daily import may have brought some in while the picker was open.
+    const present = importedEntryPaths(folder, config);
+    return importGfEntries(folder, config, connection, entries, entryIds.filter((id) => !present[String(id)]));
+  });
+});
+
+// One import at a time, so the daily import and someone's manual import on
+// the same computer never both write the same entry.
+let gfImportQueue = Promise.resolve();
+
+function withGfImportLock(fn) {
+  const run = gfImportQueue.then(fn, fn);
+  gfImportQueue = run.catch(() => {});
+  return run;
+}
+
+// Turns each of `entryIds` (from the already-fetched `entries`) into an
+// application in the Inbox -- its PDF, "API" tag and record -- and adds it
+// to the import history. Shared by the manual and daily imports.
+async function importGfEntries(folder, config, connection, entries, entryIds) {
   const byId = new Map(entries.map((e) => [String(e.id), e]));
   // The PDF lists every answer under the form's own labels and sections.
   // Best-effort: if the form can't be fetched, the PDF falls back to
@@ -1318,7 +1352,7 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
   fs.mkdirSync(inboxDir, { recursive: true });
   const imported = [];
   const errors = [];
-  const importedEntries = { ...(config.importedEntries || {}) };
+  const importedEntries = {};
   for (const id of entryIds) {
     const entry = byId.get(String(id));
     if (!entry) {
@@ -1351,6 +1385,92 @@ ipcMain.handle("import-gf-entries", async (event, folder, entryIds) => {
   const latest = readApiConfig(folder) || config;
   writeApiConfig(folder, { ...latest, importedEntries: { ...(latest.importedEntries || {}), ...importedEntries } });
   return { imported, errors };
+}
+
+// ---- The daily import ----
+// See renderer/daily-import.js for what it does and the `dailyImport` state
+// it keeps in .api-config.json. The window asks for a run whenever it
+// refreshes (on opening the folder, every 5 minutes, and on focus);
+// dailyImportDue decides whether this computer actually checks.
+//
+// Computers are told apart by their Windows computer name.
+const THIS_COMPUTER = os.hostname();
+
+ipcMain.handle("get-computer-name", () => THIS_COMPUTER);
+
+// Merges `patch` into the folder's dailyImport, re-reading the file first so
+// nothing anyone else wrote in the meantime is lost.
+function updateDailyImport(folder, patch) {
+  const latest = readApiConfig(folder);
+  if (!latest) return null;
+  const next = { ...latest, dailyImport: { ...(latest.dailyImport || {}), ...patch } };
+  writeApiConfig(folder, next);
+  return next;
+}
+
+// Ticking "Run the daily import on this computer" moves it here from
+// whichever computer had it; unticking it here leaves no computer running it.
+ipcMain.handle("set-daily-import-here", async (event, folder, on) => {
+  const config = readApiConfig(folder);
+  if (!config || !config.formId) throw new Error("No API connection configured for this folder yet.");
+  const daily = config.dailyImport || {};
+  const now = new Date().toISOString();
+  if (on) {
+    return updateDailyImport(folder, {
+      computer: THIS_COMPUTER,
+      person: readAbAppsName() || readSettings().commenterName || null,
+      assignedAt: now,
+      since: daily.since || now,
+      lastError: null,
+    });
+  }
+  if (daily.computer !== THIS_COMPUTER) return config;
+  return updateDailyImport(folder, { computer: null, person: null, lastError: null });
+});
+
+// Checks the website and imports every new submission, if this computer runs
+// the daily import and it's due (or `force`, for "Check now"). Returns
+// { ran: false } when it didn't check, else { ran: true, imported, failed,
+// error }. Failures are recorded in dailyImport.lastError, where the banner
+// and the settings show them; a submission that failed isn't added to the
+// history, so the next day's check tries it again.
+ipcMain.handle("run-daily-import", async (event, folder, force) => {
+  const shouldRun = (config) => {
+    const daily = config?.dailyImport;
+    if (!config?.formId || daily?.computer !== THIS_COMPUTER) return false;
+    return !!force || dailyImportDue(daily, THIS_COMPUTER, Date.now());
+  };
+  if (!shouldRun(readApiConfig(folder))) return { ran: false };
+  return withGfImportLock(async () => {
+    // Again, now that it's this run's turn: one queued behind another may
+    // find the check already done.
+    const config = readApiConfig(folder);
+    if (!shouldRun(config)) return { ran: false };
+    try {
+      const connection = apiConnection(config);
+      if (!connection.siteUrl || !connection.consumerKey || !connection.consumerSecret) {
+        throw new Error("This computer has no key for the website. Sign in to AB Apps here, or enter the key under Connection.");
+      }
+      const { entries } = await fetchAllGfEntries(connection);
+      const alreadyImported = new Set([...Object.keys(config.importedEntries || {}), ...Object.keys(importedEntryPaths(folder, config))]);
+      const ids = entriesForDailyImport(entries, { alreadyImported, since: config.dailyImport.since });
+      const { imported, errors } = ids.length ? await importGfEntries(folder, config, connection, entries, ids) : { imported: [], errors: [] };
+      const at = new Date().toISOString();
+      const failed = errors.map((e) => `#${e.id}: ${e.error}`).join("; ");
+      updateDailyImport(folder, {
+        lastAutoCheckAt: at,
+        lastCheckAt: at,
+        lastCheckOn: THIS_COMPUTER,
+        lastImported: imported.length,
+        lastError: errors.length ? { at, message: `${errors.length} submission${errors.length === 1 ? "" : "s"} couldn't be imported (${failed}).` } : null,
+      });
+      return { ran: true, imported: imported.length, failed: errors.length };
+    } catch (e) {
+      const message = e.message || String(e);
+      updateDailyImport(folder, { lastError: { at: new Date().toISOString(), message } });
+      return { ran: true, imported: 0, failed: 0, error: message };
+    }
+  });
 });
 
 // After the mapping changes (or is set up for the first time on a

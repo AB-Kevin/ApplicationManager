@@ -156,15 +156,30 @@ if a test fails.
   the site. The site URL must start with `https://`. While someone is
   signed in to AB Apps and a manager has set the website on its "Mail and
   website" page, every folder uses that address and read-only key instead of
-  its own, and "Connect" only chooses the form. Only three things are
-  mapped ("Mapping"): which online answers hold the name, the member ID,
+  its own, and "Connect" only chooses the form. Once connected, the
+  section's "Settings" holds everything else. Only three things are
+  mapped ("Field mapping"): which online answers hold the name, the member ID,
   and the member start date — plus which plan imports are filed under.
-  "Import" drops each new submission into an `Inbox` subfolder (created if
+  An import drops each new submission into an `Inbox` subfolder (created if
   missing) as a PDF listing every answered field under the online form's own
   labels and sections, plus its `.appform.json` record, and tags it `API` so
   it's easy to tell apart from a scanned application at a glance. Saving a
   changed mapping fills in any already-imported application missing one of
   those values, without overwriting anything already entered.
+- **The daily import.** One computer — whichever has "Run the daily import
+  on this computer" ticked under Online Applications → Settings — checks the
+  website once a day while ApplicationManager is open there, and imports
+  every submission made since the daily import was first turned on that
+  hasn't been imported before. (An imported application that someone deletes
+  stays deleted; "Import by hand" can still bring it back.) It needs no
+  setup beyond the tick: the connection is in the folder, though a computer
+  not signed in to AB Apps needs the key entered under "Connection" if the
+  website was set in AB Apps. Ticking it on another computer moves it there.
+  Every computer shows a banner when no computer runs it, or when nothing has
+  been checked for two days (a check by hand counts); the computer that runs
+  it shows one when its last check failed. "Import by hand" in the same
+  Settings is for when that computer is off for a while. Computers are told
+  apart by their Windows computer name.
 - Deleting a file (with a confirmation prompt first), setting its entry
   date (and the move that goes with it), editing its tags/comments, or renaming/deleting a predefined tag in the tag manager
   can all be undone with the "Undo" button in the top bar (or Ctrl+Z), one step

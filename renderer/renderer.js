@@ -197,6 +197,10 @@ const state = {
   apiImportSelected: new Set(), // entry ids checked in the import picker
   apiImportBusy: false,
   apiImportError: null,
+  apiHubOpen: false, // the rail's Online Applications > Settings — see renderApiHubModal
+  computerName: "", // this computer's name, which the daily import is assigned by — see daily-import.js
+  dailyImportBusy: false, // true while this computer's daily import is checking
+  dailyImportNotice: null, // "Imported 3 new online applications…", shown in the banner until dismissed
   aboutOpen: false,
   commenterName: "", // per-device name signed onto new comments — see main.js's settings.json
   commenterModalOpen: false, // shown unskippably on first launch (no commenterName yet), or on demand from the Options dialog
@@ -562,11 +566,14 @@ async function refreshFiles(skipFocusNudge = false) {
     flushPendingComments();
     flushPendingRecordSaves();
     await waitForPendingMetaWrites();
-    [state.files, state.allFolders, state.records, state.plans] = await Promise.all([
+    // The API config too: the daily import on another computer keeps its
+    // status there, which the banner reads.
+    [state.files, state.allFolders, state.records, state.plans, state.apiConfig] = await Promise.all([
       window.api.listFiles(state.folder),
       window.api.listFolders(state.folder),
       window.api.listRecords(state.folder),
       window.api.getPlans(state.folder),
+      window.api.getApiConfig(state.folder),
     ]);
     // Drop any selected paths that no longer exist under this name (moved elsewhere
     // by this same action, deleted, or changed outside the app) rather than leaving
@@ -587,6 +594,10 @@ async function refreshFiles(skipFocusNudge = false) {
   // since blurring/refocusing the window before Windows has finished giving it
   // focus is what was leaving the app opening behind other windows on launch.
   if (!skipFocusNudge) window.api.nudgeWindowFocus();
+  // Every refresh (opening the folder, the 5-minute timer, coming back to
+  // the window) is a chance for the daily import to run, if it's this
+  // computer's and it's due. Not awaited -- a check can take a while.
+  maybeRunDailyImport();
 }
 
 // Auto-refresh: periodically rescans the open folder for changes made outside
@@ -1387,7 +1398,7 @@ document.addEventListener("keydown", (e) => {
   if (isEditableTarget(document.activeElement)) return;
   const combo = comboFromEvent(e);
   if (combo !== "Ctrl+A" && combo !== "Cmd+A") return;
-  if (!state.folder || state.reviewMode || state.tagModalOpen || state.aboutOpen || state.colorPicker || state.commenterModalOpen || state.settingsModalOpen || state.apiSetupModalOpen || state.apiMappingModalOpen || state.apiImportModalOpen || state.plansModalOpen || state.mainView !== "files") return;
+  if (!state.folder || state.reviewMode || state.tagModalOpen || state.aboutOpen || state.colorPicker || state.commenterModalOpen || state.settingsModalOpen || state.apiSetupModalOpen || state.apiMappingModalOpen || state.apiImportModalOpen || state.apiHubOpen || state.plansModalOpen || state.mainView !== "files") return;
   e.preventDefault();
   const filtered = getFiltered();
   if (filtered.length === 0) return;
@@ -1415,6 +1426,7 @@ document.addEventListener("keydown", (e) => {
   else if (state.settingsModalOpen) closeSettingsModal();
   else if (state.plansModalOpen) closePlansModal();
   else if (state.apiMappingModalOpen) closeApiMappingModal();
+  else if (state.apiHubOpen) closeApiHub();
   else if (state.reviewMode) exitReviewMode();
 });
 
@@ -1475,7 +1487,7 @@ document.addEventListener("keydown", (e) => {
   if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
   if (isEditableTarget(document.activeElement)) return;
   if (state.reviewMode) return; // the grid isn't even on screen — see the review-mode arrow handler below instead
-  if (state.tagModalOpen || state.aboutOpen || state.colorPicker || state.commenterModalOpen || state.settingsModalOpen || state.recordingShortcutIdx !== null || state.apiSetupModalOpen || state.apiMappingModalOpen || state.apiImportModalOpen || state.plansModalOpen || state.mainView !== "files") return;
+  if (state.tagModalOpen || state.aboutOpen || state.colorPicker || state.commenterModalOpen || state.settingsModalOpen || state.recordingShortcutIdx !== null || state.apiSetupModalOpen || state.apiMappingModalOpen || state.apiImportModalOpen || state.apiHubOpen || state.plansModalOpen || state.mainView !== "files") return;
   const filtered = getFiltered();
   if (filtered.length === 0) return;
 
@@ -1809,6 +1821,8 @@ function render() {
     app.appendChild(renderLoadingScreen());
     return;
   }
+  const banners = renderDailyImportBanners();
+  if (banners) app.appendChild(banners);
   // The Tracker and Summary views need the room the preview pane would
   // take — a selected file's details don't apply to them anyway.
   const wideView = !state.reviewMode && state.folder && state.mainView !== "files";
@@ -1847,6 +1861,7 @@ function render() {
   if (state.commenterModalOpen) app.appendChild(renderCommenterNameModal());
   if (state.apiSetupModalOpen) app.appendChild(renderApiSetupModal());
   if (state.apiMappingModalOpen) app.appendChild(renderApiMappingModal());
+  if (state.apiHubOpen) app.appendChild(renderApiHubModal());
   if (state.apiImportModalOpen) app.appendChild(renderApiImportModal());
   if (state.plansModalOpen) app.appendChild(renderPlansModal());
   restoreFocus(focusInfo);
@@ -2112,11 +2127,7 @@ function renderRail() {
           <div class="bm-rail-label">Online Applications</div>
           ${
             state.apiConfig
-              ? `<span class="bm-rail-link-group">
-                  <button class="bm-rail-link" id="api-import-btn" title="Check the API for new submissions">Import</button>
-                  <button class="bm-rail-link" id="api-mapping-btn" title="Which online fields fill in the name, member ID, and start date, and which plan imports go to">Mapping</button>
-                  <button class="bm-rail-link" id="api-settings-btn" title="Edit the API connection">Settings</button>
-                </span>`
+              ? `<button class="bm-rail-link" id="api-hub-btn" title="The daily import, importing by hand, the field mapping, and the connection">Settings</button>`
               : `<button class="bm-rail-link" id="api-connect-btn" title="Connect to your Gravity Forms API">Connect</button>`
           }
         </div>`
@@ -2141,14 +2152,8 @@ function renderRail() {
       render();
     });
   });
-  const apiMappingBtn = rail.querySelector("#api-mapping-btn");
-  if (apiMappingBtn) apiMappingBtn.addEventListener("click", openApiMappingModal);
-  const apiConnectBtn = rail.querySelector("#api-connect-btn");
-  if (apiConnectBtn) apiConnectBtn.addEventListener("click", openApiSetupModal);
-  const apiImportBtn = rail.querySelector("#api-import-btn");
-  if (apiImportBtn) apiImportBtn.addEventListener("click", openApiImportModal);
-  const apiSettingsBtn = rail.querySelector("#api-settings-btn");
-  if (apiSettingsBtn) apiSettingsBtn.addEventListener("click", openApiSetupModal);
+  rail.querySelector("#api-connect-btn")?.addEventListener("click", openApiSetupModal);
+  rail.querySelector("#api-hub-btn")?.addEventListener("click", openApiHub);
   const navAll = rail.querySelector("#nav-all");
   if (navAll) navAll.addEventListener("click", () => { state.activeTags = new Set(); state.activeFolder = null; state.untaggedOnly = false; render(); });
   const navUntagged = rail.querySelector("#nav-untagged");
@@ -4709,7 +4714,7 @@ function renderApiImportModal() {
     <div class="bm-modal-overlay" id="api-import-overlay">
       <div class="bm-modal bm-api-import-modal">
         <div class="bm-modal-header">
-          <div class="bm-modal-title">Import from API</div>
+          <div class="bm-modal-title">Import by hand</div>
           <div class="bm-modal-sub">
             ${
               state.apiImportBusy
@@ -4757,6 +4762,209 @@ function renderApiImportModal() {
   });
   const runBtn = overlay.querySelector("#api-import-run");
   if (runBtn) runBtn.addEventListener("click", runApiImport);
+  return overlay;
+}
+
+// ---- The daily import ----
+// See daily-import.js for how it works. This computer runs it only while
+// it's the one ticked in Online Applications > Settings; main.js does the
+// checking and importing, and this side asks for a run after every refresh
+// and shows how it's going.
+
+let dailyImportInFlight = false;
+
+async function maybeRunDailyImport(force = false) {
+  const folder = state.folder;
+  if (!folder || dailyImportInFlight) return;
+  if (!force && !dailyImportDue(state.apiConfig?.dailyImport, state.computerName, Date.now())) return;
+  dailyImportInFlight = true;
+  state.dailyImportBusy = true;
+  if (state.apiHubOpen) render();
+  let result;
+  try {
+    result = await window.api.runDailyImport(folder, force);
+  } catch (e) {
+    result = { ran: true, imported: 0, error: e.message || String(e) };
+  } finally {
+    dailyImportInFlight = false;
+    state.dailyImportBusy = false;
+  }
+  if (state.folder !== folder) return;
+  state.apiConfig = await window.api.getApiConfig(folder);
+  if (result.imported > 0) {
+    state.dailyImportNotice = `The daily import brought in ${result.imported} new online application${result.imported === 1 ? "" : "s"}. They're in the Inbox.`;
+    await refreshFiles(true);
+  } else {
+    render();
+  }
+}
+
+function formatWhen(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// "Mary Martin's computer (DESKTOP-8F3K2L)", or just the computer's name.
+function dailyImportWho(daily) {
+  if (!daily?.computer) return "";
+  if (daily.computer === state.computerName) return `this computer (${daily.computer})`;
+  return daily.person ? `${daily.person}'s computer (${daily.computer})` : daily.computer;
+}
+
+// Up to two strips under the header: a warning from dailyImportWarning
+// (nobody runs the daily import, it's failing here, or nothing has been
+// checked for two days), and a dismissible note after this computer's daily
+// import brought something in.
+function renderDailyImportBanners() {
+  if (!state.folder || !state.apiConfig?.formId) return null;
+  const daily = state.apiConfig.dailyImport;
+  const warning = dailyImportWarning(daily, state.computerName, Date.now());
+  let warningText = "";
+  if (warning?.kind === "unassigned") {
+    warningText = "No computer is set to import online applications each day.";
+  } else if (warning?.kind === "failing") {
+    warningText = `The daily import couldn't finish its last check (${formatWhen(warning.at)}): ${warning.message}`;
+  } else if (warning?.kind === "late") {
+    warningText =
+      `Online applications haven't been checked ${warning.lastCheckAt ? `since ${formatWhen(warning.lastCheckAt)}` : "yet"}. ` +
+      `The daily import runs on ${dailyImportWho(daily)}, which may be off or not running ApplicationManager.` +
+      (warning.message ? ` Its last error: ${warning.message}` : "");
+  }
+  if (!warningText && !state.dailyImportNotice) return null;
+  const wrap = el(`
+    <div class="bm-banners">
+      ${
+        warningText
+          ? `<div class="bm-banner bm-banner-warning" role="status">
+              <span class="bm-banner-text">${escapeHtml(warningText)}</span>
+              <button class="bm-btn bm-btn-secondary bm-btn-sm" id="banner-api-hub">Online application settings</button>
+            </div>`
+          : ""
+      }
+      ${
+        state.dailyImportNotice
+          ? `<div class="bm-banner bm-banner-info" role="status">
+              <span class="bm-banner-text">${escapeHtml(state.dailyImportNotice)}</span>
+              <button class="bm-icon-btn" id="banner-dismiss-notice" title="Dismiss">${ICONS.x}</button>
+            </div>`
+          : ""
+      }
+    </div>
+  `);
+  wrap.querySelector("#banner-api-hub")?.addEventListener("click", openApiHub);
+  wrap.querySelector("#banner-dismiss-notice")?.addEventListener("click", () => {
+    state.dailyImportNotice = null;
+    render();
+  });
+  return wrap;
+}
+
+// ---- Online Applications > Settings ----
+// One place for the daily import, importing by hand (kept out of the rail
+// so it isn't clicked by accident -- the daily import is the usual way in),
+// and the existing mapping and connection modals.
+
+async function openApiHub() {
+  if (state.tagModalOpen) closeTagManager(false);
+  if (state.aboutOpen) closeAbout();
+  if (state.settingsModalOpen) closeSettingsModal();
+  state.apiHubOpen = true;
+  render();
+  // Whatever another computer's daily import has done since the last refresh.
+  state.apiConfig = await window.api.getApiConfig(state.folder);
+  render();
+}
+
+function closeApiHub() {
+  state.apiHubOpen = false;
+  render();
+}
+
+async function setDailyImportHere(on) {
+  const daily = state.apiConfig?.dailyImport || {};
+  if (on && daily.computer && daily.computer !== state.computerName) {
+    if (!confirm(`The daily import runs on ${dailyImportWho(daily)}. Move it to this computer? That computer will stop running it.`)) return render();
+  }
+  if (!on && !confirm("Stop running the daily import on this computer? Until another computer is set to run it, online applications will only come in when someone imports them by hand.")) {
+    return render();
+  }
+  try {
+    state.apiConfig = await window.api.setDailyImportHere(state.folder, on);
+  } catch (e) {
+    alert(`Couldn't change the daily import:\n${e.message || e}`);
+  }
+  render();
+  if (on) maybeRunDailyImport();
+}
+
+function renderApiHubModal() {
+  const daily = state.apiConfig?.dailyImport || {};
+  const here = !!daily.computer && daily.computer === state.computerName;
+  const status = [];
+  status.push(daily.computer ? `Runs on ${escapeHtml(dailyImportWho(daily))}.` : "No computer runs it.");
+  if (state.dailyImportBusy) status.push("Checking the website now…");
+  else if (daily.lastAutoCheckAt) {
+    const n = daily.lastImported || 0;
+    status.push(`Last checked ${escapeHtml(formatWhen(daily.lastAutoCheckAt))}, and imported ${n} application${n === 1 ? "" : "s"}.`);
+  } else if (daily.computer) status.push("It hasn't checked yet.");
+  if (daily.since) status.push(`It imports submissions from ${escapeHtml(formatWhen(daily.since))} on. Older ones can be imported by hand.`);
+  const overlay = el(`
+    <div class="bm-modal-overlay" id="api-hub-overlay">
+      <div class="bm-modal">
+        <div class="bm-modal-header">
+          <div class="bm-modal-title">Online applications</div>
+          <div class="bm-modal-sub">Submissions to the Member Application form on the website come in as applications in the Inbox.</div>
+        </div>
+        <div class="bm-modal-body">
+          <div class="bm-hub-section">
+            <div class="bm-section-label">Daily import</div>
+            <div class="bm-tag-hint">${status.join(" ")}</div>
+            ${daily.lastError ? `<div class="bm-hub-error">Last check failed (${escapeHtml(formatWhen(daily.lastError.at))}): ${escapeHtml(daily.lastError.message)}</div>` : ""}
+            <label class="bm-checkbox-label">
+              <input type="checkbox" id="hub-daily-here" ${here ? "checked" : ""} ${state.dailyImportBusy ? "disabled" : ""} />
+              Run the daily import on this computer
+            </label>
+            <div class="bm-tag-hint">Once a day, while ApplicationManager is open here, it checks the website and imports every new submission. Only one computer runs it, so ticking this moves it here.</div>
+            ${here ? `<button class="bm-btn bm-btn-secondary bm-btn-sm" id="hub-check-now" ${state.dailyImportBusy ? "disabled" : ""}>${state.dailyImportBusy ? "Checking…" : "Check now"}</button>` : ""}
+          </div>
+          <div class="bm-hub-section">
+            <div class="bm-section-label">Import by hand</div>
+            <div class="bm-tag-hint">For when the daily import's computer is off for a while, or to bring back an application that was deleted. It lists the submissions that aren't here, and you choose which to import.</div>
+            <button class="bm-btn bm-btn-secondary bm-btn-sm" id="hub-import">${ICONS.download} Import by hand…</button>
+          </div>
+          <div class="bm-hub-section">
+            <div class="bm-section-label">Setup</div>
+            <div class="bm-hub-buttons">
+              <button class="bm-btn bm-btn-secondary bm-btn-sm" id="hub-mapping" title="Which online fields fill in the name, member ID, and start date, and which plan imports go to">Field mapping…</button>
+              <button class="bm-btn bm-btn-secondary bm-btn-sm" id="hub-connection" title="The website and which form">Connection…</button>
+            </div>
+          </div>
+        </div>
+        <div class="bm-modal-footer">
+          <button class="bm-btn bm-btn-primary bm-btn-maroon bm-btn-sm" id="hub-close">Close</button>
+        </div>
+      </div>
+    </div>
+  `);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) closeApiHub();
+  });
+  overlay.querySelector("#hub-close").addEventListener("click", closeApiHub);
+  overlay.querySelector("#hub-daily-here").addEventListener("change", (e) => setDailyImportHere(e.target.checked));
+  overlay.querySelector("#hub-check-now")?.addEventListener("click", () => maybeRunDailyImport(true));
+  overlay.querySelector("#hub-import").addEventListener("click", () => {
+    state.apiHubOpen = false;
+    openApiImportModal();
+  });
+  overlay.querySelector("#hub-mapping").addEventListener("click", () => {
+    state.apiHubOpen = false;
+    openApiMappingModal();
+  });
+  overlay.querySelector("#hub-connection").addEventListener("click", () => {
+    state.apiHubOpen = false;
+    openApiSetupModal();
+  });
   return overlay;
 }
 
@@ -4870,6 +5078,7 @@ function renderCommenterNameModal() {
   });
   render(); // paint the loading screen immediately, before any of the awaits below
   state.appVersion = await window.api.getAppVersion();
+  state.computerName = await window.api.getComputerName();
   state.commenterName = (await window.api.getCommenterName()) || "";
   state.commenterNameDraft = state.commenterName;
   state.abAppsName = (await window.api.getAbAppsName()) || "";
