@@ -1004,8 +1004,15 @@ function mergeRecordPatch(current, patch, editor) {
 // again (or undoing it) sends the file back to Inbox, and a file loose at the
 // root goes to whichever one fits (see fileLooseFiles). A same-named file
 // already at the destination gets a " (n)" suffix, same as an import does.
+//
+// A canceled application is moved into Canceled (see set-canceled) rather
+// than deleted: its file and record are kept in case anything changes, and
+// its sidecar still carries its gfEntryId, so importedEntryPaths keeps it
+// from being offered for import again. Nothing refiles a file out of
+// Canceled except restoring it.
 const INBOX_DIRNAME = "Inbox";
 const ENTERED_DIRNAME = "Entered";
+const CANCELED_DIRNAME = "Canceled";
 
 // OneDrive (or a PDF viewer) can hold a file for a moment -- same transient
 // lock writeJsonRetrying waits out. Without this, an entry date saved while
@@ -1025,15 +1032,10 @@ function renameRetrying(src, dest, retries) {
   }
 }
 
+// Moves `relPath` into the top-level `destDir`, along with its sidecar.
 // `retries` is for a save the person is waiting on; the folder scan passes 0
 // and just tries again on its next pass.
-function fileByEntryStatus(folder, relPath, rec, { retries = MOVE_RETRIES } = {}) {
-  const inEntered = relPath.startsWith(`${ENTERED_DIRNAME}/`);
-  const atRoot = !relPath.includes("/");
-  let destDir = null;
-  if (rec.entryDate && !inEntered) destDir = ENTERED_DIRNAME;
-  else if (!rec.entryDate && (inEntered || atRoot)) destDir = INBOX_DIRNAME;
-  if (!destDir) return { path: relPath };
+function moveIntoStatusDir(folder, relPath, destDir, { retries = MOVE_RETRIES } = {}) {
   const ext = path.extname(relPath);
   const base = path.basename(relPath, ext);
   let name = `${base}${ext}`;
@@ -1044,10 +1046,23 @@ function fileByEntryStatus(folder, relPath, rec, { retries = MOVE_RETRIES } = {}
     fs.mkdirSync(path.dirname(destFull), { recursive: true });
     renameRetrying(srcFull, destFull, retries);
   } catch (e) {
-    return { path: relPath, moveError: `Saved, but couldn't move "${path.basename(relPath)}" to ${destDir}: ${e.message}` };
+    return { path: relPath, moveError: `Couldn't move "${path.basename(relPath)}" to ${destDir}: ${e.message}` };
   }
   moveSidecarIfExists(srcFull, destFull);
   return { path: `${destDir}/${name}` };
+}
+
+function fileByEntryStatus(folder, relPath, rec, opts) {
+  if (relPath.startsWith(`${CANCELED_DIRNAME}/`)) return { path: relPath };
+  const inEntered = relPath.startsWith(`${ENTERED_DIRNAME}/`);
+  const atRoot = !relPath.includes("/");
+  let destDir = null;
+  if (rec.entryDate && !inEntered) destDir = ENTERED_DIRNAME;
+  else if (!rec.entryDate && (inEntered || atRoot)) destDir = INBOX_DIRNAME;
+  if (!destDir) return { path: relPath };
+  const moved = moveIntoStatusDir(folder, relPath, destDir, opts);
+  if (moved.moveError) moved.moveError = `Saved, but ${moved.moveError[0].toLowerCase()}${moved.moveError.slice(1)}`;
+  return moved;
 }
 
 // Nothing stays loose at the workspace root: a file dropped there (by a
@@ -1060,7 +1075,7 @@ function fileByEntryStatus(folder, relPath, rec, { retries = MOVE_RETRIES } = {}
 // an Inbox or Entered, so pointing "Choose folder" at the wrong place never
 // rearranges it.
 function fileLooseFiles(folder) {
-  const isWorkspace = [INBOX_DIRNAME, ENTERED_DIRNAME].some((d) => fs.existsSync(path.join(folder, d)));
+  const isWorkspace = [INBOX_DIRNAME, ENTERED_DIRNAME, CANCELED_DIRNAME].some((d) => fs.existsSync(path.join(folder, d)));
   if (!isWorkspace) return;
   const filesIn = (dir) => {
     try {
@@ -1090,6 +1105,31 @@ ipcMain.handle("patch-app-form", async (event, folder, relPath, patch, editor) =
   // the file wherever it is, even if someone has moved it by hand.
   const filed = "entryDate" in patch ? fileByEntryStatus(folder, relPath, rec) : { path: relPath };
   return { record: rec, ...filed };
+});
+
+// Cancels (moves into Canceled) or restores each of `relPaths`. A restored
+// file goes back to Entered if it has an entry date, otherwise to Inbox.
+// Files already where they're headed are left alone.
+ipcMain.handle("set-canceled", async (event, folder, relPaths, canceled) => {
+  const moved = [];
+  const errors = [];
+  for (const relPath of relPaths) {
+    if (!fs.existsSync(path.join(folder, relPath))) {
+      errors.push({ path: relPath, error: "This file was moved or deleted (possibly on another computer)." });
+      continue;
+    }
+    const isCanceled = relPath.startsWith(`${CANCELED_DIRNAME}/`);
+    if (isCanceled === !!canceled) continue;
+    const destDir = canceled
+      ? CANCELED_DIRNAME
+      : normalizeRecord(readAppForm(path.join(folder, relPath))).entryDate
+        ? ENTERED_DIRNAME
+        : INBOX_DIRNAME;
+    const result = moveIntoStatusDir(folder, relPath, destDir);
+    if (result.moveError) errors.push({ path: relPath, error: result.moveError });
+    else moved.push({ from: relPath, to: result.path });
+  }
+  return { moved, errors };
 });
 
 // ---- Gravity Forms API import ----

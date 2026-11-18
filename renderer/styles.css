@@ -601,7 +601,7 @@ a:hover { color: var(--text-accent); border-bottom-color: var(--border-rule); }
 .bm-preview-meta { font-family: var(--font-condensed); font-size: 12px; letter-spacing: 0.04em; color: var(--text-caption); margin-top: 4px; word-break: break-word; }
 /* Kept well clear of "Open" (top-right, next to the filename) so a delete
    click can't land right after an open click by accident. */
-.bm-preview-delete-row { display: flex; justify-content: flex-end; margin-top: var(--space-3); }
+.bm-preview-delete-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-3); }
 .bm-preview-plate {
   height: 260px; flex-shrink: 0; background: var(--surface-card-alt); border: 1px solid var(--border-hairline);
   display: flex; align-items: center; justify-content: center; cursor: pointer; overflow: hidden;

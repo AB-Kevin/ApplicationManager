@@ -403,11 +403,19 @@ function getAllTags() {
 }
 
 // The rail's folder list. Files are filed by status (see main.js's
-// fileByEntryStatus and fileLooseFiles), so Inbox and Entered are always
-// listed, even while empty, and nothing sits loose at the root. Any other
-// top-level folder that holds files (made by hand outside the app) is listed
-// after them so its files stay reachable; counts include subfolders.
-const STATUS_FOLDERS = ["Inbox", "Entered"];
+// fileByEntryStatus and fileLooseFiles), so Inbox, Entered and Canceled are
+// always listed, even while empty, and nothing sits loose at the root. Any
+// other top-level folder that holds files (made by hand outside the app) is
+// listed after them so its files stay reachable; counts include subfolders.
+const INBOX_FOLDER = "Inbox";
+const CANCELED_FOLDER = "Canceled";
+const STATUS_FOLDERS = [INBOX_FOLDER, "Entered", CANCELED_FOLDER];
+
+// A canceled application's file is kept in Canceled (see cancelSelected) and
+// left out of the tracker, the summary and the export.
+function isCanceled(file) {
+  return file.path.startsWith(`${CANCELED_FOLDER}/`);
+}
 
 function railFolders(files) {
   const counts = new Map(STATUS_FOLDERS.map((name) => [name, 0]));
@@ -672,7 +680,7 @@ async function openFolder(folder, isStartup = false) {
   state.selected = new Set();
   state.selectAnchor = null;
   state.activeTags = new Set();
-  state.activeFolder = null;
+  state.activeFolder = INBOX_FOLDER; // opens on what's still waiting to be entered
   state.untaggedOnly = false;
   state.search = "";
   state.activePlan = null;
@@ -765,7 +773,7 @@ function rowForRecord(record) {
 }
 
 function allRows() {
-  return [...state.files.map(rowForFile), ...state.records.map(rowForRecord)];
+  return [...state.files.filter((f) => !isCanceled(f)).map(rowForFile), ...state.records.map(rowForRecord)];
 }
 
 // A file's comments live in its own metadata; a record-only row's (e.g. an
@@ -1084,6 +1092,45 @@ async function undoBulkDelete(deleted) {
   }
   if (errors.length > 0) {
     throw new Error(`Some files couldn't be restored:\n${errors.join("\n")}`);
+  }
+}
+
+// Cancels the selected applications (moves them into Canceled) or, with
+// `canceled` false, restores them to Entered or Inbox (see main.js's
+// set-canceled). Nothing is deleted, so no confirm: Ctrl+Z, or Restore,
+// moves them back.
+async function setSelectedCanceled(canceled) {
+  const files = getSelectedFiles().filter((f) => isCanceled(f) !== canceled);
+  if (files.length === 0 || !state.folder) return;
+  flushPendingComments();
+  flushPendingRecordSaves();
+  await Promise.all([...pendingMetaWrites]);
+  let moved = [];
+  let errors = [];
+  try {
+    const result = await window.api.setCanceled(state.folder, files.map((f) => f.path), canceled);
+    moved = result.moved;
+    errors = result.errors;
+  } catch (e) {
+    errors = files.map((f) => ({ path: f.path, error: e.message || String(e) }));
+  } finally {
+    state.selected = new Set();
+    state.selectAnchor = null;
+    await refreshFiles();
+  }
+  if (moved.length > 0) {
+    const n = moved.length;
+    const what = n === 1 ? "application" : `${n} applications`;
+    pushUndo(`${canceled ? "Cancel" : "Restore"} ${what}`, async () => {
+      const result = await window.api.setCanceled(state.folder, moved.map((m) => m.to), !canceled);
+      if (result.errors.length > 0) throw new Error(result.errors.map((e) => `${e.path}: ${e.error}`).join("\n"));
+    });
+  }
+  if (errors.length > 0) {
+    alert(
+      `${canceled ? "Canceled" : "Restored"} ${moved.length} of ${files.length}. ${errors.length} failed:\n\n` +
+        errors.map((e) => `• ${e.path}: ${e.error}`).join("\n")
+    );
   }
 }
 
@@ -3642,6 +3689,11 @@ function wireTagsCommentsPane(panel) {
   panel.querySelector("#add-comment-btn").addEventListener("click", addComment);
 }
 
+function wireCancelButtons(panel) {
+  panel.querySelector("#cancel-app-btn")?.addEventListener("click", () => setSelectedCanceled(true));
+  panel.querySelector("#restore-btn")?.addEventListener("click", () => setSelectedCanceled(false));
+}
+
 function renderPreviewSingle(file, opts = {}) {
   // Review mode's big viewer (renderReviewMain) shows this file's plate
   // instead — showing it twice at once would be redundant screen space.
@@ -3659,6 +3711,11 @@ function renderPreviewSingle(file, opts = {}) {
           ${extLabel(file.ext)} · ${formatSize(file.size)} · ${formatDate(file.mtime)}${file.dir ? ` · ${file.dir}` : ""}
         </div>
         <div class="bm-preview-delete-row">
+          ${
+            isCanceled(file)
+              ? `<button class="bm-btn bm-btn-secondary bm-btn-sm" id="restore-btn" title="Move back to ${file.appForm.entryDate ? "Entered" : "Inbox"}">${ICONS.undo} Restore application</button>`
+              : `<button class="bm-btn bm-btn-secondary bm-btn-sm" id="cancel-app-btn" title="Move to the Canceled folder, keeping the file and its record">${ICONS.x} Cancel application</button>`
+          }
           <button class="bm-btn bm-btn-secondary bm-btn-maroon bm-btn-sm" id="delete-btn">${ICONS.trash} Delete file</button>
         </div>
       </div>
@@ -3691,6 +3748,7 @@ function renderPreviewSingle(file, opts = {}) {
   }
   wireApplicationFields(panel, row);
   wireTagsCommentsPane(panel);
+  wireCancelButtons(panel);
   panel.querySelector("#delete-btn").addEventListener("click", deleteSelected);
 
   return panel;
@@ -3748,6 +3806,14 @@ function renderPreviewMulti(files) {
         </div>
         <div class="bm-preview-meta">${formatSize(totalSize)} total</div>
         <div class="bm-preview-delete-row">
+          ${(() => {
+            const canceledCount = files.filter(isCanceled).length;
+            const activeCount = files.length - canceledCount;
+            return [
+              canceledCount > 0 ? `<button class="bm-btn bm-btn-secondary bm-btn-sm" id="restore-btn" title="Move back to Entered or Inbox">${ICONS.undo} Restore ${canceledCount}</button>` : "",
+              activeCount > 0 ? `<button class="bm-btn bm-btn-secondary bm-btn-sm" id="cancel-app-btn" title="Move to the Canceled folder, keeping the files and their records">${ICONS.x} Cancel ${activeCount}</button>` : "",
+            ].join("");
+          })()}
           <button class="bm-btn bm-btn-secondary bm-btn-maroon bm-btn-sm" id="delete-btn">${ICONS.trash} Delete ${files.length} files</button>
         </div>
       </div>
@@ -3807,6 +3873,7 @@ function renderPreviewMulti(files) {
     </aside>
   `);
 
+  wireCancelButtons(panel);
   panel.querySelector("#delete-btn").addEventListener("click", deleteSelected);
   panel.querySelectorAll(".bm-mini-card").forEach((card) => {
     card.addEventListener("click", () => {

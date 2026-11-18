@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.invoke("update-file-meta", folder, filename, patch),
   deleteFile: (folder, filename) => ipcRenderer.invoke("delete-file", folder, filename),
   deleteFiles: (folder, relPaths) => ipcRenderer.invoke("delete-files-batch", folder, relPaths),
+  setCanceled: (folder, relPaths, canceled) => ipcRenderer.invoke("set-canceled", folder, relPaths, canceled),
   restoreFile: (trashPath, folder, filename) => ipcRenderer.invoke("restore-file", trashPath, folder, filename),
   listFolders: (folder) => ipcRenderer.invoke("list-folders", folder),
   nudgeWindowFocus: () => ipcRenderer.invoke("nudge-window-focus"),
